@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::{self, Stdout};
 use std::time::Duration;
 
@@ -64,8 +65,9 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(12),
-            Constraint::Min(16),
             Constraint::Length(10),
+            Constraint::Min(14),
+            Constraint::Length(8),
             Constraint::Length(10),
         ])
         .split(frame.area());
@@ -82,12 +84,24 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
         layout[0],
     );
 
+    let log_tail = log_tail_text(snapshot);
+    frame.render_widget(
+        Paragraph::new(log_tail)
+            .block(
+                Block::default()
+                    .title("Live Log Tail")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        layout[1],
+    );
+
     let running = running_text(snapshot);
     frame.render_widget(
         Paragraph::new(running)
             .block(Block::default().title("Running").borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
-        layout[1],
+        layout[2],
     );
 
     let review = review_text(snapshot);
@@ -95,7 +109,7 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
         Paragraph::new(review)
             .block(Block::default().title("Needs Review").borders(Borders::ALL))
             .wrap(Wrap { trim: true }),
-        layout[2],
+        layout[3],
     );
 
     let retry = retry_text(snapshot);
@@ -107,7 +121,7 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: true }),
-        layout[3],
+        layout[4],
     );
 }
 
@@ -416,6 +430,76 @@ fn review_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
     Text::from(lines)
 }
 
+fn log_tail_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
+    let mut lines = Vec::new();
+    let selected = snapshot
+        .running
+        .iter()
+        .find_map(|entry| {
+            entry.telemetry.stdout_log_path.as_ref().map(|path| {
+                (
+                    entry.identifier.as_str(),
+                    path.as_str(),
+                    entry.telemetry.phase_detail.as_deref(),
+                )
+            })
+        })
+        .or_else(|| {
+            snapshot.needs_review.iter().find_map(|entry| {
+                entry.telemetry.stdout_log_path.as_ref().map(|path| {
+                    (
+                        entry.identifier.as_str(),
+                        path.as_str(),
+                        entry.telemetry.review_reason.as_deref(),
+                    )
+                })
+            })
+        });
+
+    let Some((issue_identifier, log_path, context)) = selected else {
+        lines.push(Line::from(vec![Span::styled(
+            "No active or review-blocked issue has a stdout log yet.",
+            Style::default().fg(Color::DarkGray),
+        )]));
+        return Text::from(lines);
+    };
+
+    lines.push(Line::from(format!(
+        "issue={}  path={}",
+        truncate(issue_identifier, 48),
+        truncate(log_path, 96),
+    )));
+    lines.push(Line::from(format!(
+        "context={}",
+        truncate(context.unwrap_or("live Codex stdout tail"), 108),
+    )));
+    lines.push(Line::from(""));
+
+    match fs::read_to_string(log_path) {
+        Ok(contents) => {
+            let tail = tail_lines(&contents, 8);
+            if tail.is_empty() {
+                lines.push(Line::from(vec![Span::styled(
+                    "Log file is present but empty.",
+                    Style::default().fg(Color::DarkGray),
+                )]));
+            } else {
+                for line in tail.lines() {
+                    lines.push(Line::from(truncate(line, 144)));
+                }
+            }
+        }
+        Err(_) => {
+            lines.push(Line::from(vec![Span::styled(
+                "Log file is not readable yet.",
+                Style::default().fg(Color::Yellow),
+            )]));
+        }
+    }
+
+    Text::from(lines)
+}
+
 fn retry_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
     let mut lines = Vec::new();
     if snapshot.retrying.is_empty() {
@@ -516,4 +600,12 @@ fn truncate(value: &str, max: usize) -> String {
     } else {
         format!("{}...", &value[..max.saturating_sub(3)])
     }
+}
+
+fn tail_lines(contents: &str, lines: usize) -> String {
+    if lines == 0 {
+        return String::new();
+    }
+    let collected = contents.lines().rev().take(lines).collect::<Vec<_>>();
+    collected.into_iter().rev().collect::<Vec<_>>().join("\n")
 }

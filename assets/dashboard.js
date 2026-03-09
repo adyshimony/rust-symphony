@@ -1,6 +1,7 @@
 (function () {
   const state = window.__SYMPHONY_INITIAL_STATE__ || null;
   const mode = document.body.dataset.runtimeMode || "live";
+  let latestPayload = state;
 
   function formatInt(value) {
     if (typeof value !== "number") return "0";
@@ -85,8 +86,39 @@
     target.innerHTML = rows.join("");
   }
 
+  function primaryLogIssue(payload) {
+    return payload?.running?.[0]?.issue_identifier
+      || payload?.needs_review?.[0]?.issue_identifier
+      || payload?.retrying?.[0]?.issue_identifier
+      || null;
+  }
+
+  async function refreshStdoutTail(issueIdentifier) {
+    const target = document.getElementById("stdout-tail");
+    const label = document.getElementById("log-issue");
+    if (!target || !label) return;
+    if (!issueIdentifier) {
+      label.textContent = "n/a";
+      target.textContent = "No log stream selected.";
+      return;
+    }
+    label.textContent = issueIdentifier;
+    try {
+      const response = await fetch(`/api/v1/issues/${encodeURIComponent(issueIdentifier)}/logs/stdout?tail=40`);
+      if (!response.ok) {
+        target.textContent = "Log stream unavailable.";
+        return;
+      }
+      const text = await response.text();
+      target.textContent = text || "Log stream is empty.";
+    } catch (_err) {
+      target.textContent = "Failed to load log stream.";
+    }
+  }
+
   function render(payload) {
     if (!payload || payload.error) return;
+    latestPayload = payload;
 
     const counts = payload.counts || { running: 0, retrying: 0, needs_review: 0 };
     const totals = payload.codex_totals || {
@@ -167,6 +199,8 @@
       "No runs currently require operator review."
     );
 
+    refreshStdoutTail(primaryLogIssue(payload));
+
   }
 
   function setConnection(connected) {
@@ -216,4 +250,8 @@
       setConnection(true);
     } catch (_err) {}
   };
+
+  window.setInterval(() => {
+    refreshStdoutTail(primaryLogIssue(latestPayload));
+  }, 3000);
 })();

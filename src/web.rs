@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -22,6 +22,11 @@ const DASHBOARD_JS: &str = include_str!("../assets/dashboard.js");
 struct WebState {
     orchestrator: OrchestratorHandle,
     config: Arc<ServiceConfig>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct TailQuery {
+    tail: Option<usize>,
 }
 
 pub async fn spawn_server(
@@ -57,6 +62,22 @@ pub async fn spawn_server(
         .route(
             "/api/v1/issues/{issue_identifier}/retry",
             post(retry_issue_api),
+        )
+        .route(
+            "/api/v1/issues/{issue_identifier}/logs/stdout",
+            get(stdout_log_api),
+        )
+        .route(
+            "/api/v1/issues/{issue_identifier}/logs/stderr",
+            get(stderr_log_api),
+        )
+        .route(
+            "/api/v1/issues/{issue_identifier}/reports/discovery",
+            get(discovery_report_api),
+        )
+        .route(
+            "/api/v1/issues/{issue_identifier}/reports/progress",
+            get(progress_report_api),
         )
         .route("/api/v1/{issue_identifier}", get(issue_api))
         .fallback(not_found)
@@ -144,16 +165,55 @@ async fn issue_api(
     State(state): State<WebState>,
 ) -> Result<Json<presenter::IssuePayload>, (StatusCode, Json<serde_json::Value>)> {
     let snapshot = state.orchestrator.snapshot().await;
-    presenter::issue_payload(&issue_identifier, &state.config, &snapshot)
-        .map(Json)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": { "code": "issue_not_found", "message": "Issue not found" }
-                })),
-            )
-        })
+    issue_payload_or_404(&issue_identifier, &state.config, &snapshot).map(Json)
+}
+
+async fn stdout_log_api(
+    Path(issue_identifier): Path<String>,
+    Query(query): Query<TailQuery>,
+    State(state): State<WebState>,
+) -> Response {
+    artifact_response(
+        artifact_path(&state, &issue_identifier, |payload| payload.logs.stdout_log_path.clone()).await,
+        query.tail,
+    )
+    .await
+}
+
+async fn stderr_log_api(
+    Path(issue_identifier): Path<String>,
+    Query(query): Query<TailQuery>,
+    State(state): State<WebState>,
+) -> Response {
+    artifact_response(
+        artifact_path(&state, &issue_identifier, |payload| payload.logs.stderr_log_path.clone()).await,
+        query.tail,
+    )
+    .await
+}
+
+async fn discovery_report_api(
+    Path(issue_identifier): Path<String>,
+    Query(query): Query<TailQuery>,
+    State(state): State<WebState>,
+) -> Response {
+    artifact_response(
+        artifact_path(&state, &issue_identifier, |payload| payload.logs.discovery_report_path.clone()).await,
+        query.tail,
+    )
+    .await
+}
+
+async fn progress_report_api(
+    Path(issue_identifier): Path<String>,
+    Query(query): Query<TailQuery>,
+    State(state): State<WebState>,
+) -> Response {
+    artifact_response(
+        artifact_path(&state, &issue_identifier, |payload| payload.logs.progress_report_path.clone()).await,
+        query.tail,
+    )
+    .await
 }
 
 async fn not_found() -> impl IntoResponse {
@@ -172,6 +232,64 @@ fn control_response(result: crate::model::ControlActionResult) -> impl IntoRespo
         crate::model::ControlActionStatus::Conflict => StatusCode::CONFLICT,
     };
     (status, Json(presenter::control_payload(result)))
+}
+
+fn issue_payload_or_404(
+    issue_identifier: &str,
+    config: &ServiceConfig,
+    snapshot: &crate::model::Snapshot,
+) -> Result<presenter::IssuePayload, (StatusCode, Json<serde_json::Value>)> {
+    presenter::issue_payload(issue_identifier, config, snapshot).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": { "code": "issue_not_found", "message": "Issue not found" }
+            })),
+        )
+    })
+}
+
+async fn artifact_path(
+    state: &WebState,
+    issue_identifier: &str,
+    select: impl FnOnce(&presenter::IssuePayload) -> Option<String>,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let snapshot = state.orchestrator.snapshot().await;
+    let payload = issue_payload_or_404(issue_identifier, &state.config, &snapshot)?;
+    select(&payload).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": { "code": "artifact_not_found", "message": "Artifact path unavailable" }
+            })),
+        )
+    })
+}
+
+async fn artifact_response(
+    path_result: Result<String, (StatusCode, Json<serde_json::Value>)>,
+    tail: Option<usize>,
+) -> Response {
+    match path_result {
+        Ok(path) => match tokio::fs::read_to_string(&path).await {
+            Ok(contents) => {
+                let body = match tail {
+                    Some(lines) => tail_lines(&contents, lines),
+                    None => contents,
+                };
+                (StatusCode::OK, [("content-type", "text/plain; charset=utf-8")], body)
+                    .into_response()
+            }
+            Err(_) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": { "code": "artifact_missing", "message": "Artifact file not found" }
+                })),
+            )
+                .into_response(),
+        },
+        Err(error) => error.into_response(),
+    }
 }
 
 async fn websocket_loop(mut socket: WebSocket, mut rx: watch::Receiver<crate::model::Snapshot>) {
@@ -285,6 +403,17 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
             )
         })
         .collect::<String>();
+    let live_log_issue = payload
+        .running
+        .as_ref()
+        .and_then(|entries| entries.first().map(|entry| entry.issue_identifier.clone()))
+        .or_else(|| {
+            payload
+                .needs_review
+                .as_ref()
+                .and_then(|entries| entries.first().map(|entry| entry.issue_identifier.clone()))
+        })
+        .unwrap_or_default();
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -352,6 +481,13 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         </div>
         <aside class="content-secondary">
           <section class="section-card insight-card">
+            <div class="section-header"><div><h2 class="section-title">Live stdout tail</h2><p class="section-copy">Latest Codex stdout lines for the primary active or review-blocked issue.</p></div></div>
+            <div class="context-list">
+              <div class="context-row"><span class="context-label">Issue</span><span class="context-value" id="log-issue">{live_log_issue}</span></div>
+            </div>
+            <pre class="code-panel" id="stdout-tail">No log stream selected.</pre>
+          </section>
+          <section class="section-card insight-card">
             <div class="section-header"><div><h2 class="section-title">Rate limits</h2><p class="section-copy">Latest upstream rate-limit snapshot, when available.</p></div></div>
             <pre class="code-panel" id="rate-limits">{rate_limits}</pre>
           </section>
@@ -416,6 +552,7 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         ),
         running_rows = running_rows,
         retry_rows = retry_rows,
+        live_log_issue = escape_html(&live_log_issue),
         state_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
     )
 }
@@ -591,6 +728,14 @@ fn telemetry_warning_html(total_tokens: u64) -> String {
     } else {
         String::new()
     }
+}
+
+fn tail_lines(contents: &str, lines: usize) -> String {
+    if lines == 0 {
+        return String::new();
+    }
+    let collected = contents.lines().rev().take(lines).collect::<Vec<_>>();
+    collected.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
 fn runtime_alert(
