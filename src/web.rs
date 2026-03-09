@@ -142,11 +142,15 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         .iter()
         .map(|entry| {
             format!(
-                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><span class="state-badge">{}</span></td><td>{}</td><td class="numeric">{}</td><td><div class="detail-stack"><span class="event-text">{}</span><span class="muted event-meta">{}</span></div></td><td><div class="token-stack numeric"><span>Total: {}</span><span class="muted">In {} / Out {}</span></div></td></tr>"#,
+                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><span class="state-text">{}</span></td><td>{}</td><td class="numeric">{}</td><td><div class="detail-stack"><span class="event-text">{}</span><span class="muted event-meta">{}</span></div></td><td><div class="token-stack numeric"><span>Total: {}</span><span class="muted">In {} / Out {}</span></div></td></tr>"#,
                 escape_html(&entry.issue_identifier),
                 escape_html(&entry.issue_identifier),
                 escape_html(&entry.state),
-                entry.session_id.as_deref().map(copy_button).unwrap_or_else(|| "<span class=\"muted\">n/a</span>".to_string()),
+                entry
+                    .session_id
+                    .as_deref()
+                    .map(session_text)
+                    .unwrap_or_else(|| "<span class=\"muted\">n/a</span>".to_string()),
                 format_runtime(&entry.started_at),
                 escape_html(entry.last_message.as_deref().unwrap_or("n/a")),
                 escape_html(entry.last_event.as_deref().unwrap_or("n/a")),
@@ -178,7 +182,7 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Symphony Operations Dashboard</title>
+  <title>Symphony Operations Console</title>
   <link rel="stylesheet" href="/dashboard.css" />
 </head>
 <body data-project-url="{project_url}" data-runtime-mode="{runtime_mode}">
@@ -188,13 +192,13 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         <div class="hero-grid">
           <div class="hero-copy-wrap">
             <div class="hero-meta-row">
-              <p class="eyebrow">Symphony Observability</p>
+              <p class="eyebrow">Symphony Control Plane</p>
               <span class="mode-badge" id="mode-badge">{mode_label}</span>
             </div>
-            <h1 class="hero-title">Operations Dashboard</h1>
-            <p class="hero-copy">Live orchestration status, retry pressure, token burn, and agent activity across the current Symphony runtime.</p>
+            <h1 class="hero-title">Operations Console</h1>
+            <p class="hero-copy">Live orchestration state, retry pressure, rate limits, token burn, and agent activity across the current Symphony runtime.</p>
             <div class="hero-actions">
-              <a class="action-pill action-pill-primary" href="{project_url}" target="_blank" rel="noreferrer">Open Tracker</a>
+              <a class="action-pill action-pill-primary" href="{project_url}" target="_blank" rel="noreferrer">{project_link_label}</a>
               <button id="refresh-now" class="action-pill action-pill-secondary" type="button">Refresh Now</button>
             </div>
           </div>
@@ -221,7 +225,7 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         <div class="content-primary">
           <section class="section-card section-card-large">
             <div class="section-header"><div><h2 class="section-title">Running sessions</h2><p class="section-copy">Active issues, last known agent activity, and token usage.</p></div><div class="section-pill">{running} active</div></div>
-            <div class="table-wrap" id="running-wrap"><table class="data-table data-table-running"><thead><tr><th>Issue</th><th>State</th><th>Session</th><th>Runtime / turns</th><th>Codex update</th><th>Tokens</th></tr></thead><tbody id="running-body">{running_rows}</tbody></table></div>
+            <div class="table-wrap" id="running-wrap"><table class="data-table data-table-running"><thead><tr><th>Issue</th><th>State</th><th>Session</th><th>Started</th><th>Codex update</th><th>Tokens</th></tr></thead><tbody id="running-body">{running_rows}</tbody></table></div>
           </section>
           <section class="section-card">
             <div class="section-header"><div><h2 class="section-title">Retry queue</h2><p class="section-copy">Issues waiting for the next retry window.</p></div><div class="section-pill section-pill-warm">{retrying} queued</div></div>
@@ -238,7 +242,7 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
             <div class="context-list">
               <div class="context-row"><span class="context-label">Mode</span><span class="context-value" id="context-mode">{mode_label}</span></div>
               <div class="context-row"><span class="context-label">Tracker</span><span class="context-value">{tracker_name}</span></div>
-              <div class="context-row"><span class="context-label">Project</span><a class="context-link" href="{project_url}" target="_blank" rel="noreferrer">Open source view</a></div>
+              <div class="context-row"><span class="context-label">Project</span><a class="context-link" href="{project_url}" target="_blank" rel="noreferrer">{project_context_label}</a></div>
               <div class="context-row"><span class="context-label">API</span><a class="context-link" href="/api/v1/state" target="_blank" rel="noreferrer">Current snapshot JSON</a></div>
             </div>
           </section>
@@ -251,6 +255,8 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
 </body>
 </html>"#,
         project_url = escape_html(&project_url(config)),
+        project_link_label = escape_html(project_link_label(config)),
+        project_context_label = escape_html(project_context_label(config)),
         runtime_mode = escape_html(runtime_mode(config)),
         mode_label = escape_html(runtime_mode_label(config)),
         tracker_name = escape_html(&tracker_name(config)),
@@ -321,6 +327,7 @@ fn project_url(config: &ServiceConfig) -> String {
             let repo = config.github_repo.as_deref().unwrap_or("");
             format!("https://github.com/{owner}/{repo}/issues")
         }
+        Some("memory") => "/api/v1/state".to_string(),
         _ => {
             let project = config.linear_project_slug.as_deref().unwrap_or("");
             format!("https://linear.app/project/{project}/issues")
@@ -328,11 +335,22 @@ fn project_url(config: &ServiceConfig) -> String {
     }
 }
 
-fn copy_button(session_id: &str) -> String {
-    format!(
-        r#"<button type="button" class="subtle-button" data-label="Copy ID" data-copy="{}" onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => this.textContent = this.dataset.label, 1200);">Copy ID</button>"#,
-        escape_html(session_id)
-    )
+fn project_link_label(config: &ServiceConfig) -> &'static str {
+    match config.tracker_kind.as_deref() {
+        Some("memory") => "Open Snapshot",
+        _ => "Open Tracker",
+    }
+}
+
+fn project_context_label(config: &ServiceConfig) -> &'static str {
+    match config.tracker_kind.as_deref() {
+        Some("memory") => "Runtime snapshot",
+        _ => "Open source view",
+    }
+}
+
+fn session_text(session_id: &str) -> String {
+    format!(r#"<span class="session-text mono">{}</span>"#, escape_html(session_id))
 }
 
 fn format_runtime(started_at: &Option<String>) -> String {

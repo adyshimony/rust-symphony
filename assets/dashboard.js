@@ -34,20 +34,7 @@
 
   function sessionCell(sessionId) {
     if (!sessionId) return `<span class="muted">n/a</span>`;
-    return `<button type="button" class="subtle-button" data-label="Copy ID" data-copy="${sessionId}">Copy ID</button>`;
-  }
-
-  function bindCopyButtons() {
-    document.querySelectorAll(".subtle-button[data-copy]").forEach((button) => {
-      button.onclick = function () {
-        navigator.clipboard.writeText(button.dataset.copy);
-        button.textContent = "Copied";
-        clearTimeout(button._copyTimer);
-        button._copyTimer = setTimeout(() => {
-          button.textContent = button.dataset.label;
-        }, 1200);
-      };
-    });
+    return `<span class="session-text mono">${sessionId}</span>`;
   }
 
   function renderTableBody(target, rows, emptyText) {
@@ -81,7 +68,7 @@
     const runningRows = (payload.running || []).map((entry) => `
       <tr>
         <td>${issueCell(entry.issue_identifier)}</td>
-        <td><span class="state-badge">${entry.state}</span></td>
+        <td><span class="state-text">${entry.state}</span></td>
         <td>${sessionCell(entry.session_id)}</td>
         <td class="numeric">${formatTimestamp(entry.started_at)}</td>
         <td><div class="detail-stack"><span class="event-text">${entry.last_message || "n/a"}</span><span class="muted event-meta">${entry.last_event || "n/a"}${entry.last_event_at ? ` · ${formatTimestamp(entry.last_event_at)}` : ""}</span></div></td>
@@ -110,7 +97,6 @@
       "No issues are currently backing off."
     );
 
-    bindCopyButtons();
   }
 
   function setConnection(connected) {
