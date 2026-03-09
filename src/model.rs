@@ -65,6 +65,49 @@ pub struct TokenUsage {
     pub total_tokens: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPhase {
+    Starting,
+    Discovering,
+    Editing,
+    Testing,
+    Waiting,
+    Retrying,
+    Paused,
+    Held,
+    NeedsReview,
+    Stalled,
+    Completed,
+}
+
+impl Default for RunPhase {
+    fn default() -> Self {
+        Self::Starting
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiffStats {
+    pub changed_files: u32,
+    pub added_lines: u64,
+    pub removed_lines: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunTelemetry {
+    pub phase: RunPhase,
+    pub phase_detail: Option<String>,
+    pub review_reason: Option<String>,
+    pub last_command: Option<String>,
+    pub last_file_touched: Option<String>,
+    pub diff: DiffStats,
+    pub stdout_log_path: Option<String>,
+    pub stderr_log_path: Option<String>,
+    pub progress_report_path: Option<String>,
+    pub discovery_report_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveSession {
     pub session_id: Option<String>,
@@ -102,9 +145,26 @@ impl Default for LiveSession {
 pub struct RetryEntry {
     pub issue_id: String,
     pub identifier: String,
+    pub state: String,
+    pub issue: Issue,
     pub attempt: u32,
+    pub workspace_path: String,
     pub due_at: DateTime<Utc>,
     pub error: Option<String>,
+    pub telemetry: RunTelemetry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockedEntry {
+    pub issue_id: String,
+    pub identifier: String,
+    pub state: String,
+    pub issue: Issue,
+    pub attempt: Option<u32>,
+    pub workspace_path: String,
+    pub blocked_at: DateTime<Utc>,
+    pub session: LiveSession,
+    pub telemetry: RunTelemetry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -131,12 +191,16 @@ pub struct RunningEntry {
     pub workspace_path: String,
     pub started_at: DateTime<Utc>,
     pub session: LiveSession,
+    pub telemetry: RunTelemetry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Snapshot {
     pub running: Vec<RunningEntry>,
     pub retrying: Vec<RetryEntry>,
+    pub paused: Vec<BlockedEntry>,
+    pub held: Vec<BlockedEntry>,
+    pub needs_review: Vec<BlockedEntry>,
     pub codex_totals: CodexTotals,
     pub rate_limits: Option<Value>,
     pub polling: PollingState,
@@ -163,6 +227,7 @@ pub enum WorkerUpdate {
         attempt: Option<u32>,
         workspace_path: String,
         started_at: DateTime<Utc>,
+        telemetry: RunTelemetry,
     },
     CodexMessage {
         event: String,
@@ -174,6 +239,23 @@ pub enum WorkerUpdate {
         message: Option<String>,
         usage: Option<TokenUsage>,
         rate_limits: Option<Value>,
+        phase: Option<RunPhase>,
+        phase_detail: Option<String>,
+        last_command: Option<String>,
+        last_file_touched: Option<String>,
+    },
+    Telemetry {
+        phase: Option<RunPhase>,
+        phase_detail: Option<String>,
+        review_reason: Option<String>,
+        last_command: Option<String>,
+        last_file_touched: Option<String>,
+        diff: Option<DiffStats>,
+    },
+    NeedsReview {
+        issue: Issue,
+        attempt: Option<u32>,
+        reason: String,
     },
     Finished {
         issue_id: String,
@@ -200,11 +282,29 @@ pub struct DueRetry {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlActionStatus {
+    Accepted,
+    NotFound,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlActionResult {
+    pub status: ControlActionStatus,
+    pub issue_identifier: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeState {
     pub running: HashMap<String, RunningEntry>,
     pub claimed: HashMap<String, String>,
     pub retrying: BTreeMap<String, RetryEntry>,
+    pub paused: BTreeMap<String, BlockedEntry>,
+    pub held: BTreeMap<String, BlockedEntry>,
+    pub needs_review: BTreeMap<String, BlockedEntry>,
     pub completed_totals: CodexTotals,
     pub rate_limits: Option<Value>,
     pub polling: PollingState,

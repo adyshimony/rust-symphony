@@ -88,7 +88,7 @@
   function render(payload) {
     if (!payload || payload.error) return;
 
-    const counts = payload.counts || { running: 0, retrying: 0 };
+    const counts = payload.counts || { running: 0, retrying: 0, needs_review: 0 };
     const totals = payload.codex_totals || {
       total_tokens: 0,
       input_tokens: 0,
@@ -98,6 +98,7 @@
 
     document.getElementById("metric-running").textContent = counts.running;
     document.getElementById("metric-retrying").textContent = counts.retrying;
+    document.getElementById("metric-review").textContent = counts.needs_review || 0;
     document.getElementById("metric-total-tokens").textContent = formatInt(totals.total_tokens);
     document.getElementById("metric-input-tokens").textContent = formatInt(totals.input_tokens);
     document.getElementById("metric-output-tokens").textContent = formatInt(totals.output_tokens);
@@ -106,7 +107,9 @@
     document.getElementById("rate-limits").textContent = JSON.stringify(payload.rate_limits, null, 2);
     const runtimeAlert = document.getElementById("runtime-alert");
     if (runtimeAlert) {
-      if ((payload.running || []).length === 0) {
+      if ((payload.needs_review || []).length > 0) {
+        runtimeAlert.textContent = "At least one run is paused for operator review.";
+      } else if ((payload.running || []).length === 0) {
         runtimeAlert.textContent = "No active runs. The runtime is currently idle.";
       } else if ((payload.running || []).some((entry) => runHealth(entry).label === "stalled?")) {
         runtimeAlert.textContent = "At least one run looks stalled: last Codex update is older than 5 minutes.";
@@ -120,11 +123,11 @@
     const runningRows = (payload.running || []).map((entry) => `
       <tr>
         <td><div class="issue-stack"><span class="issue-id">${entry.issue_identifier}</span><span class="issue-title">${entry.issue_title || "Untitled issue"}</span><a class="issue-link" href="/api/v1/${encodeURIComponent(entry.issue_identifier)}">JSON details</a></div></td>
-        <td><div class="detail-stack"><span class="state-text">${entry.state}</span><span class="health-chip ${runHealth(entry).className}">${runHealth(entry).label}</span></div></td>
-        <td><div class="detail-stack"><span>${formatTimestamp(entry.started_at)}</span><span class="muted">Last update ${formatTimestamp(entry.last_event_at)}</span><span class="muted">Idle ${idleText(entry)}</span></div></td>
+        <td><div class="detail-stack"><span class="state-text">${entry.state}</span><span class="health-chip ${runHealth(entry).className}">${runHealth(entry).label}</span><span class="muted">phase ${entry.phase || "unknown"}</span></div></td>
+        <td><div class="detail-stack"><span>${formatTimestamp(entry.started_at)}</span><span class="muted">Last update ${formatTimestamp(entry.last_event_at)}</span><span class="muted">Idle ${idleText(entry)}</span><span class="muted">${entry.phase_detail || "n/a"}</span></div></td>
         <td><div class="detail-stack"><span>PID ${entry.codex_app_server_pid || "n/a"} · turn ${entry.turn_count ?? 0}</span><span class="muted mono">session ${entry.session_id || "n/a"}</span><span class="muted mono">thread ${entry.thread_id || "n/a"}</span></div></td>
-        <td><div class="detail-stack"><span class="event-text">${entry.last_event || "n/a"}</span><span class="muted">${entry.last_message || "n/a"}</span></div></td>
-        <td><div class="token-stack numeric"><span>Total: ${formatInt(entry.tokens.total_tokens)}</span><span class="muted">In ${formatInt(entry.tokens.input_tokens)} / Out ${formatInt(entry.tokens.output_tokens)}</span><span class="muted workspace-path">${entry.workspace_path || "n/a"}</span>${telemetryWarning(entry)}</div></td>
+        <td><div class="detail-stack"><span class="event-text">${entry.last_event || "n/a"}</span><span class="muted">${entry.last_message || "n/a"}</span><span class="muted mono">cmd ${entry.last_command || "n/a"}</span><span class="muted mono">file ${entry.last_file_touched || "n/a"}</span></div></td>
+        <td><div class="token-stack numeric"><span>Total: ${formatInt(entry.tokens.total_tokens)}</span><span class="muted">In ${formatInt(entry.tokens.input_tokens)} / Out ${formatInt(entry.tokens.output_tokens)}</span><span class="muted">diff ${entry.diff?.changed_files || 0} +${formatInt(entry.diff?.added_lines || 0)} -${formatInt(entry.diff?.removed_lines || 0)}</span><span class="muted workspace-path">${entry.workspace_path || "n/a"}</span><span class="muted workspace-path">${entry.stdout_log_path || "n/a"}</span><span class="muted workspace-path">${entry.progress_report_path || "n/a"}</span>${telemetryWarning(entry)}</div></td>
       </tr>
     `);
 
@@ -134,6 +137,15 @@
         <td>${entry.attempt}</td>
         <td class="mono">${formatTimestamp(entry.due_at)}</td>
         <td>${entry.error || "n/a"}</td>
+      </tr>
+    `);
+
+    const reviewRows = (payload.needs_review || []).map((entry) => `
+      <tr>
+        <td><div class="issue-stack"><span class="issue-id">${entry.issue_identifier}</span><span class="issue-title">${entry.issue_title || "Untitled issue"}</span><a class="issue-link" href="/api/v1/${encodeURIComponent(entry.issue_identifier)}">JSON details</a></div></td>
+        <td><div class="detail-stack"><span class="state-text">${entry.state}</span><span class="health-chip health-chip-stalled">${entry.phase || "needs_review"}</span></div></td>
+        <td><div class="detail-stack"><span>${entry.review_reason || "review required"}</span><span class="muted">${entry.phase_detail || "n/a"}</span></div></td>
+        <td><div class="detail-stack"><span class="muted mono">cmd ${entry.last_command || "n/a"}</span><span class="muted mono">file ${entry.last_file_touched || "n/a"}</span><span class="muted">diff ${entry.diff?.changed_files || 0} +${formatInt(entry.diff?.added_lines || 0)} -${formatInt(entry.diff?.removed_lines || 0)}</span></div></td>
       </tr>
     `);
 
@@ -147,6 +159,12 @@
       document.getElementById("retry-body"),
       retryRows,
       "No issues are currently backing off."
+    );
+
+    renderTableBody(
+      document.getElementById("review-body"),
+      reviewRows,
+      "No runs currently require operator review."
     );
 
   }

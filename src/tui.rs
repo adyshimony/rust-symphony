@@ -63,8 +63,9 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(11),
-            Constraint::Min(14),
+            Constraint::Length(12),
+            Constraint::Min(16),
+            Constraint::Length(10),
             Constraint::Length(10),
         ])
         .split(frame.area());
@@ -72,7 +73,11 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
     let header = header_text(snapshot);
     frame.render_widget(
         Paragraph::new(header)
-            .block(Block::default().title("SYMPHONY STATUS").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("SYMPHONY STATUS")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
         layout[0],
     );
@@ -85,18 +90,34 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
         layout[1],
     );
 
+    let review = review_text(snapshot);
+    frame.render_widget(
+        Paragraph::new(review)
+            .block(Block::default().title("Needs Review").borders(Borders::ALL))
+            .wrap(Wrap { trim: true }),
+        layout[2],
+    );
+
     let retry = retry_text(snapshot);
     frame.render_widget(
         Paragraph::new(retry)
-            .block(Block::default().title("Backoff Queue").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("Backoff Queue")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
-        layout[2],
+        layout[3],
     );
 }
 
 fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
     let mut lines = Vec::new();
-    let total_agents = snapshot.running.len() + snapshot.retrying.len();
+    let total_agents = snapshot.running.len()
+        + snapshot.retrying.len()
+        + snapshot.paused.len()
+        + snapshot.held.len()
+        + snapshot.needs_review.len();
     let telemetry_missing = snapshot.running.iter().any(|entry| {
         entry.session.codex_total_tokens == 0 && entry.session.last_codex_timestamp.is_some()
     });
@@ -110,6 +131,11 @@ fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
         Span::styled(
             format!("retrying {}", snapshot.retrying.len()),
             Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("review {}", snapshot.needs_review.len()),
+            Style::default().fg(Color::LightRed),
         ),
         Span::raw(" | "),
         Span::raw(format!("tracked {}", total_agents)),
@@ -145,24 +171,22 @@ fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
             "Per-run tokens: ",
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::raw(
-            if snapshot.running.is_empty() {
-                "n/a".to_string()
-            } else {
-                snapshot
-                    .running
-                    .iter()
-                    .map(|entry| {
-                        format!(
-                            "{}={}",
-                            truncate(&entry.identifier, 20),
-                            entry.session.codex_total_tokens
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            },
-        ),
+        Span::raw(if snapshot.running.is_empty() {
+            "n/a".to_string()
+        } else {
+            snapshot
+                .running
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{}={}",
+                        truncate(&entry.identifier, 20),
+                        entry.session.codex_total_tokens
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Telemetry: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -182,7 +206,10 @@ fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Rate Limits: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Rate Limits: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::raw(
             snapshot
                 .rate_limits
@@ -192,7 +219,10 @@ fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Next refresh: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Next refresh: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             if snapshot.polling.checking {
                 "checking now...".to_string()
@@ -218,19 +248,28 @@ fn running_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
         )]));
     } else {
         for entry in &snapshot.running {
-            let last_seen = entry.session.last_codex_timestamp.unwrap_or(entry.started_at);
+            let last_seen = entry
+                .session
+                .last_codex_timestamp
+                .unwrap_or(entry.started_at);
             let idle_secs = (Utc::now() - last_seen).num_seconds().max(0);
             let age_secs = (Utc::now() - entry.started_at).num_seconds().max(0);
             let status = classify_run(entry);
             lines.push(Line::from(vec![
                 Span::styled(
                     truncate(&entry.identifier, 48),
-                    Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan),
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(Color::Cyan),
                 ),
                 Span::raw("  "),
                 Span::styled(status, Style::default().fg(status_color(status))),
                 Span::raw("  "),
-                Span::raw(format!("state {}", entry.state)),
+                Span::raw(format!(
+                    "state {}  phase {}",
+                    entry.state,
+                    phase_label(&entry.telemetry.phase)
+                )),
             ]));
             lines.push(Line::from(format!(
                 "  title={} ",
@@ -241,7 +280,11 @@ fn running_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
                 human_duration(age_secs),
                 human_duration(idle_secs),
                 entry.session.turn_count,
-                entry.session.codex_app_server_pid.as_deref().unwrap_or("n/a"),
+                entry
+                    .session
+                    .codex_app_server_pid
+                    .as_deref()
+                    .unwrap_or("n/a"),
                 entry.session.codex_input_tokens,
                 entry.session.codex_output_tokens,
                 entry.session.codex_total_tokens,
@@ -258,17 +301,58 @@ fn running_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
                 truncate(entry.session.turn_id.as_deref().unwrap_or("n/a"), 28),
             )));
             lines.push(Line::from(format!(
+                "  command={}  file={}  diff=files {} +{} -{}",
+                truncate(entry.telemetry.last_command.as_deref().unwrap_or("n/a"), 48),
+                truncate(
+                    entry
+                        .telemetry
+                        .last_file_touched
+                        .as_deref()
+                        .unwrap_or("n/a"),
+                    48
+                ),
+                entry.telemetry.diff.changed_files,
+                entry.telemetry.diff.added_lines,
+                entry.telemetry.diff.removed_lines,
+            )));
+            lines.push(Line::from(format!(
                 "  workspace={}",
                 truncate(&entry.workspace_path, 108),
             )));
             lines.push(Line::from(format!(
-                "  event={}  message={}",
-                truncate(entry.session.last_codex_event.as_deref().unwrap_or("n/a"), 32),
+                "  logs={}  stderr={}  report={}",
                 truncate(
-                    entry.session
-                        .last_codex_message
+                    entry.telemetry.stdout_log_path.as_deref().unwrap_or("n/a"),
+                    42
+                ),
+                truncate(
+                    entry.telemetry.stderr_log_path.as_deref().unwrap_or("n/a"),
+                    42
+                ),
+                truncate(
+                    entry
+                        .telemetry
+                        .progress_report_path
                         .as_deref()
                         .unwrap_or("n/a"),
+                    42
+                ),
+            )));
+            lines.push(Line::from(format!(
+                "  detail={}",
+                truncate(
+                    entry.telemetry.phase_detail.as_deref().unwrap_or("n/a"),
+                    108
+                ),
+            )));
+            lines.push(Line::from(format!(
+                "  event={}  message={}",
+                truncate(
+                    entry.session.last_codex_event.as_deref().unwrap_or("n/a"),
+                    32
+                ),
+                truncate(
+                    entry.session.last_codex_message.as_deref().unwrap_or("n/a"),
                     96,
                 ),
             )));
@@ -279,6 +363,54 @@ fn running_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
                 )]));
             }
             lines.push(Line::from(""));
+        }
+    }
+    Text::from(lines)
+}
+
+fn review_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
+    let mut lines = Vec::new();
+    if snapshot.needs_review.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "No review-blocked runs",
+            Style::default().fg(Color::DarkGray),
+        )]));
+    } else {
+        for entry in &snapshot.needs_review {
+            lines.push(Line::from(vec![
+                Span::styled("! ", Style::default().fg(Color::LightRed)),
+                Span::styled(
+                    truncate(&entry.identifier, 48),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "  phase={}  blocked_at={}",
+                    phase_label(&entry.telemetry.phase),
+                    format_timestamp(entry.blocked_at),
+                )),
+            ]));
+            lines.push(Line::from(format!(
+                "  reason={}",
+                truncate(
+                    entry.telemetry.review_reason.as_deref().unwrap_or("n/a"),
+                    108
+                ),
+            )));
+            lines.push(Line::from(format!(
+                "  command={}  file={}  diff=files {} +{} -{}",
+                truncate(entry.telemetry.last_command.as_deref().unwrap_or("n/a"), 48),
+                truncate(
+                    entry
+                        .telemetry
+                        .last_file_touched
+                        .as_deref()
+                        .unwrap_or("n/a"),
+                    48
+                ),
+                entry.telemetry.diff.changed_files,
+                entry.telemetry.diff.added_lines,
+                entry.telemetry.diff.removed_lines,
+            )));
         }
     }
     Text::from(lines)
@@ -341,6 +473,22 @@ fn status_color(status: &str) -> Color {
         "stalled?" => Color::LightRed,
         "active/no-usage" => Color::Magenta,
         _ => Color::Green,
+    }
+}
+
+fn phase_label(phase: &crate::model::RunPhase) -> &'static str {
+    match phase {
+        crate::model::RunPhase::Starting => "starting",
+        crate::model::RunPhase::Discovering => "discovering",
+        crate::model::RunPhase::Editing => "editing",
+        crate::model::RunPhase::Testing => "testing",
+        crate::model::RunPhase::Waiting => "waiting",
+        crate::model::RunPhase::Retrying => "retrying",
+        crate::model::RunPhase::Paused => "paused",
+        crate::model::RunPhase::Held => "held",
+        crate::model::RunPhase::NeedsReview => "needs_review",
+        crate::model::RunPhase::Stalled => "stalled",
+        crate::model::RunPhase::Completed => "completed",
     }
 }
 

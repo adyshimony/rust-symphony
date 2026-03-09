@@ -58,6 +58,34 @@ fn default_max_retry_backoff_ms() -> u64 {
     300_000
 }
 
+fn default_discovery_turn_required() -> bool {
+    true
+}
+
+fn default_max_autonomous_turns_before_review() -> u32 {
+    3
+}
+
+fn default_max_runtime_minutes_before_review() -> u64 {
+    20
+}
+
+fn default_max_changed_files_before_review() -> usize {
+    12
+}
+
+fn default_max_diff_lines_before_review() -> usize {
+    800
+}
+
+fn default_max_idle_minutes_before_review() -> u64 {
+    10
+}
+
+fn default_max_tokens_before_review() -> u64 {
+    200_000
+}
+
 fn default_codex_command() -> String {
     "codex app-server".to_string()
 }
@@ -165,6 +193,20 @@ struct RawAgentConfig {
     max_turns: u32,
     #[serde(default = "default_max_retry_backoff_ms")]
     max_retry_backoff_ms: u64,
+    #[serde(default = "default_discovery_turn_required")]
+    discovery_turn_required: bool,
+    #[serde(default = "default_max_autonomous_turns_before_review")]
+    max_autonomous_turns_before_review: u32,
+    #[serde(default = "default_max_runtime_minutes_before_review")]
+    max_runtime_minutes_before_review: u64,
+    #[serde(default = "default_max_changed_files_before_review")]
+    max_changed_files_before_review: usize,
+    #[serde(default = "default_max_diff_lines_before_review")]
+    max_diff_lines_before_review: usize,
+    #[serde(default = "default_max_idle_minutes_before_review")]
+    max_idle_minutes_before_review: u64,
+    #[serde(default = "default_max_tokens_before_review")]
+    max_tokens_before_review: u64,
     #[serde(default)]
     max_concurrent_agents_by_state: HashMap<String, usize>,
 }
@@ -175,6 +217,13 @@ impl Default for RawAgentConfig {
             max_concurrent_agents: default_max_concurrent_agents(),
             max_turns: default_max_turns(),
             max_retry_backoff_ms: default_max_retry_backoff_ms(),
+            discovery_turn_required: default_discovery_turn_required(),
+            max_autonomous_turns_before_review: default_max_autonomous_turns_before_review(),
+            max_runtime_minutes_before_review: default_max_runtime_minutes_before_review(),
+            max_changed_files_before_review: default_max_changed_files_before_review(),
+            max_diff_lines_before_review: default_max_diff_lines_before_review(),
+            max_idle_minutes_before_review: default_max_idle_minutes_before_review(),
+            max_tokens_before_review: default_max_tokens_before_review(),
             max_concurrent_agents_by_state: HashMap::new(),
         }
     }
@@ -292,6 +341,13 @@ pub struct ServiceConfig {
     pub max_concurrent_agents: usize,
     pub max_retry_backoff_ms: u64,
     pub max_turns: u32,
+    pub discovery_turn_required: bool,
+    pub max_autonomous_turns_before_review: u32,
+    pub max_runtime_minutes_before_review: u64,
+    pub max_changed_files_before_review: usize,
+    pub max_diff_lines_before_review: usize,
+    pub max_idle_minutes_before_review: u64,
+    pub max_tokens_before_review: u64,
     pub max_concurrent_agents_by_state: HashMap<String, usize>,
     pub codex_command: String,
     pub codex_turn_timeout_ms: u64,
@@ -303,6 +359,7 @@ pub struct ServiceConfig {
     pub observability_render_interval_ms: u64,
     pub server_port: Option<u16>,
     pub server_host: String,
+    pub repo_memory_path: PathBuf,
     pub prompt_template: String,
 }
 
@@ -369,6 +426,7 @@ impl ServiceConfig {
                 "writableRoots": [workspace_root.to_string_lossy()]
             })
         });
+        let repo_memory_path = workspace_root.join(".symphony").join("repo-memory.md");
 
         Ok(Self {
             workflow_path,
@@ -397,6 +455,13 @@ impl ServiceConfig {
             max_concurrent_agents: raw.agent.max_concurrent_agents,
             max_retry_backoff_ms: raw.agent.max_retry_backoff_ms,
             max_turns: raw.agent.max_turns,
+            discovery_turn_required: raw.agent.discovery_turn_required,
+            max_autonomous_turns_before_review: raw.agent.max_autonomous_turns_before_review,
+            max_runtime_minutes_before_review: raw.agent.max_runtime_minutes_before_review,
+            max_changed_files_before_review: raw.agent.max_changed_files_before_review,
+            max_diff_lines_before_review: raw.agent.max_diff_lines_before_review,
+            max_idle_minutes_before_review: raw.agent.max_idle_minutes_before_review,
+            max_tokens_before_review: raw.agent.max_tokens_before_review,
             max_concurrent_agents_by_state: raw.agent.max_concurrent_agents_by_state.clone(),
             codex_command: raw.codex.command.clone(),
             codex_turn_timeout_ms: raw.codex.turn_timeout_ms,
@@ -412,6 +477,7 @@ impl ServiceConfig {
             observability_render_interval_ms: raw.observability.render_interval_ms,
             server_port: raw.server.port,
             server_host: raw.server.host.clone(),
+            repo_memory_path,
             prompt_template: if workflow.prompt_template.trim().is_empty() {
                 default_prompt_template()
             } else {
@@ -479,6 +545,13 @@ impl ServiceConfig {
             max_concurrent_agents: default_max_concurrent_agents(),
             max_retry_backoff_ms: default_max_retry_backoff_ms(),
             max_turns: default_max_turns(),
+            discovery_turn_required: default_discovery_turn_required(),
+            max_autonomous_turns_before_review: default_max_autonomous_turns_before_review(),
+            max_runtime_minutes_before_review: default_max_runtime_minutes_before_review(),
+            max_changed_files_before_review: default_max_changed_files_before_review(),
+            max_diff_lines_before_review: default_max_diff_lines_before_review(),
+            max_idle_minutes_before_review: default_max_idle_minutes_before_review(),
+            max_tokens_before_review: default_max_tokens_before_review(),
             max_concurrent_agents_by_state: HashMap::new(),
             codex_command: default_codex_command(),
             codex_turn_timeout_ms: default_turn_timeout_ms(),
@@ -503,6 +576,7 @@ impl ServiceConfig {
             observability_render_interval_ms: default_observability_render_interval_ms(),
             server_port,
             server_host: default_server_host(),
+            repo_memory_path: workspace_root.join(".symphony").join("repo-memory.md"),
             prompt_template: default_prompt_template(),
         }
     }
@@ -533,7 +607,9 @@ fn resolve_path_value(value: &str) -> Result<PathBuf> {
         let home = env::var("HOME").context("HOME is not set")?;
         Path::new(&home).join(stripped)
     } else if let Some(env_key) = value.strip_prefix('$') {
-        PathBuf::from(env::var(env_key).with_context(|| format!("missing env path variable {env_key}"))?)
+        PathBuf::from(
+            env::var(env_key).with_context(|| format!("missing env path variable {env_key}"))?,
+        )
     } else {
         PathBuf::from(value)
     };

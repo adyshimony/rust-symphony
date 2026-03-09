@@ -1,16 +1,17 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
+use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::time::{timeout, Duration};
 
 use crate::config::ServiceConfig;
-use crate::model::{Issue, TokenUsage, WorkerEvent, WorkerUpdate};
+use crate::model::{Issue, RunPhase, TokenUsage, WorkerEvent, WorkerUpdate};
 use crate::tracker::LinearClient;
 
 pub struct AppServerSession {
@@ -21,9 +22,21 @@ pub struct AppServerSession {
     thread_id: String,
     workspace: String,
     app_server_pid: Option<String>,
+    stdout_log_path: PathBuf,
 }
 
-pub async fn start_session(config: Arc<ServiceConfig>, workspace: &Path) -> Result<AppServerSession> {
+pub async fn start_session(
+    config: Arc<ServiceConfig>,
+    workspace: &Path,
+) -> Result<AppServerSession> {
+    let (stdout_log_path, stderr_log_path) = log_paths(workspace);
+    if let Some(parent) = stdout_log_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    reset_log_file(&stdout_log_path).await?;
+    reset_log_file(&stderr_log_path).await?;
     let mut child = Command::new("bash");
     child
         .arg("-lc")
@@ -33,9 +46,20 @@ pub async fn start_session(config: Arc<ServiceConfig>, workspace: &Path) -> Resu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = child.spawn().context("failed to spawn codex app-server")?;
-    let stdin = child.stdin.take().ok_or_else(|| anyhow!("missing codex stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("missing codex stdout"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("missing codex stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("missing codex stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("missing codex stderr"))?;
     let app_server_pid = child.id().map(|id| id.to_string());
+    spawn_stderr_capture(stderr, stderr_log_path.clone());
     let mut session = AppServerSession {
         child,
         stdin,
@@ -44,9 +68,43 @@ pub async fn start_session(config: Arc<ServiceConfig>, workspace: &Path) -> Resu
         thread_id: String::new(),
         workspace: workspace.to_string_lossy().into_owned(),
         app_server_pid,
+        stdout_log_path,
     };
     session.initialize().await?;
     Ok(session)
+}
+
+fn log_paths(workspace: &Path) -> (PathBuf, PathBuf) {
+    let root = workspace.join(".symphony");
+    (
+        root.join("codex-stdout.jsonl"),
+        root.join("codex-stderr.log"),
+    )
+}
+
+async fn reset_log_file(path: &Path) -> Result<()> {
+    let _ = tokio::fs::remove_file(path).await;
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .await
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    Ok(())
+}
+
+fn spawn_stderr_capture(mut stderr: ChildStderr, path: PathBuf) {
+    tokio::spawn(async move {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+        {
+            let _ = tokio::io::copy(&mut stderr, &mut file).await;
+        }
+    });
 }
 
 impl AppServerSession {
@@ -65,7 +123,8 @@ impl AppServerSession {
         }))
         .await?;
         let _ = self.await_response(1).await?;
-        self.send(json!({"method": "initialized", "params": {}})).await?;
+        self.send(json!({"method": "initialized", "params": {}}))
+            .await?;
         self.send(json!({
             "method": "thread/start",
             "id": 2,
@@ -126,7 +185,9 @@ impl AppServerSession {
             .and_then(Value::as_str)
             .map(str::to_string);
         loop {
-            let line = self.read_line_with_timeout(self.config.codex_turn_timeout_ms).await?;
+            let line = self
+                .read_line_with_timeout(self.config.codex_turn_timeout_ms)
+                .await?;
             let payload: Value = match serde_json::from_str(&line) {
                 Ok(payload) => payload,
                 Err(_) => continue,
@@ -134,22 +195,35 @@ impl AppServerSession {
             if let Some(method) = payload.get("method").and_then(Value::as_str) {
                 match method {
                     "turn/completed" => {
-                        worker_tx.send(WorkerEvent {
-                            issue_id: issue.id.clone(),
-                            update: WorkerUpdate::CodexMessage {
-                                event: "turn_completed".to_string(),
-                                timestamp: Utc::now(),
-                                session_id: turn_id.as_ref().map(|id| format!("{}-{id}", self.thread_id)),
-                                thread_id: Some(self.thread_id.clone()),
-                                turn_id: turn_id.clone(),
-                                codex_app_server_pid: self.app_server_pid.clone(),
-                                message: Some("completed".to_string()),
-                                usage: usage_from_payload(&payload),
-                                rate_limits: payload
-                                    .get("usage")
-                                    .and_then(|usage| usage.get("rate_limits").cloned().or_else(|| usage.get("rateLimits").cloned())),
-                            },
-                        }).ok();
+                        worker_tx
+                            .send(WorkerEvent {
+                                issue_id: issue.id.clone(),
+                                update: WorkerUpdate::CodexMessage {
+                                    event: "turn_completed".to_string(),
+                                    timestamp: Utc::now(),
+                                    session_id: turn_id
+                                        .as_ref()
+                                        .map(|id| format!("{}-{id}", self.thread_id)),
+                                    thread_id: Some(self.thread_id.clone()),
+                                    turn_id: turn_id.clone(),
+                                    codex_app_server_pid: self.app_server_pid.clone(),
+                                    message: Some("completed".to_string()),
+                                    usage: usage_from_payload(&payload),
+                                    rate_limits: payload.get("usage").and_then(|usage| {
+                                        usage
+                                            .get("rate_limits")
+                                            .cloned()
+                                            .or_else(|| usage.get("rateLimits").cloned())
+                                    }),
+                                    phase: Some(RunPhase::Waiting),
+                                    phase_detail: Some(
+                                        "turn completed; reconciling issue state".to_string(),
+                                    ),
+                                    last_command: command_from_payload(&payload),
+                                    last_file_touched: file_from_payload(&payload),
+                                },
+                            })
+                            .ok();
                         return Ok(());
                     }
                     "turn/failed" => bail!("turn failed: {payload}"),
@@ -161,16 +235,24 @@ impl AppServerSession {
                     | "execCommandApproval"
                     | "applyPatchApproval"
                     | "item/fileChange/requestApproval" => {
-                        let id = payload.get("id").cloned().ok_or_else(|| anyhow!("approval request missing id"))?;
-                        let decision = if method == "execCommandApproval" || method == "applyPatchApproval" {
-                            "approved_for_session"
-                        } else {
-                            "acceptForSession"
-                        };
-                        self.send(json!({ "id": id, "result": { "decision": decision } })).await?;
+                        let id = payload
+                            .get("id")
+                            .cloned()
+                            .ok_or_else(|| anyhow!("approval request missing id"))?;
+                        let decision =
+                            if method == "execCommandApproval" || method == "applyPatchApproval" {
+                                "approved_for_session"
+                            } else {
+                                "acceptForSession"
+                            };
+                        self.send(json!({ "id": id, "result": { "decision": decision } }))
+                            .await?;
                     }
                     "item/tool/requestUserInput" => {
-                        let id = payload.get("id").cloned().ok_or_else(|| anyhow!("tool input request missing id"))?;
+                        let id = payload
+                            .get("id")
+                            .cloned()
+                            .ok_or_else(|| anyhow!("tool input request missing id"))?;
                         let answers = payload
                             .get("params")
                             .and_then(|params| params.get("questions"))
@@ -185,46 +267,62 @@ impl AppServerSession {
                                 Value::Object(answers)
                             })
                             .unwrap_or_else(|| json!({}));
-                        self.send(json!({ "id": id, "result": { "answers": answers } })).await?;
+                        self.send(json!({ "id": id, "result": { "answers": answers } }))
+                            .await?;
                     }
                     other => {
-                        worker_tx.send(WorkerEvent {
-                            issue_id: issue.id.clone(),
-                            update: WorkerUpdate::CodexMessage {
-                                event: other.to_string(),
-                                timestamp: Utc::now(),
-                                session_id: turn_id.as_ref().map(|id| format!("{}-{id}", self.thread_id)),
-                                thread_id: Some(self.thread_id.clone()),
-                                turn_id: turn_id.clone(),
-                                codex_app_server_pid: self.app_server_pid.clone(),
-                                message: summarize_payload(&payload),
-                                usage: usage_from_payload(&payload),
-                                rate_limits: payload
-                                    .get("usage")
-                                    .and_then(|usage| usage.get("rate_limits").cloned().or_else(|| usage.get("rateLimits").cloned())),
-                            },
-                        }).ok();
+                        worker_tx
+                            .send(WorkerEvent {
+                                issue_id: issue.id.clone(),
+                                update: WorkerUpdate::CodexMessage {
+                                    event: other.to_string(),
+                                    timestamp: Utc::now(),
+                                    session_id: turn_id
+                                        .as_ref()
+                                        .map(|id| format!("{}-{id}", self.thread_id)),
+                                    thread_id: Some(self.thread_id.clone()),
+                                    turn_id: turn_id.clone(),
+                                    codex_app_server_pid: self.app_server_pid.clone(),
+                                    message: summarize_payload(&payload),
+                                    usage: usage_from_payload(&payload),
+                                    rate_limits: payload.get("usage").and_then(|usage| {
+                                        usage
+                                            .get("rate_limits")
+                                            .cloned()
+                                            .or_else(|| usage.get("rateLimits").cloned())
+                                    }),
+                                    phase: infer_phase(other, &payload),
+                                    phase_detail: summarize_payload(&payload),
+                                    last_command: command_from_payload(&payload),
+                                    last_file_touched: file_from_payload(&payload),
+                                },
+                            })
+                            .ok();
                     }
                 }
             }
         }
     }
 
-    async fn handle_tool_call(&mut self, payload: &Value, linear: Option<&LinearClient>) -> Result<()> {
+    async fn handle_tool_call(
+        &mut self,
+        payload: &Value,
+        linear: Option<&LinearClient>,
+    ) -> Result<()> {
         let id = payload
             .get("id")
             .cloned()
             .ok_or_else(|| anyhow!("tool call missing id"))?;
-        let params = payload
-            .get("params")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
         let tool_name = params
             .get("tool")
             .or_else(|| params.get("name"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         let result = if tool_name == "linear_graphql" {
             if let Some(linear) = linear {
                 let query = arguments
@@ -263,7 +361,9 @@ impl AppServerSession {
 
     async fn await_response(&mut self, request_id: u64) -> Result<Value> {
         loop {
-            let line = self.read_line_with_timeout(self.config.codex_read_timeout_ms).await?;
+            let line = self
+                .read_line_with_timeout(self.config.codex_read_timeout_ms)
+                .await?;
             let payload: Value = match serde_json::from_str(&line) {
                 Ok(payload) => payload,
                 Err(_) => continue,
@@ -282,15 +382,30 @@ impl AppServerSession {
 
     async fn read_line_with_timeout(&mut self, timeout_ms: u64) -> Result<String> {
         let mut line = String::new();
-        let count = timeout(Duration::from_millis(timeout_ms), self.stdout.read_line(&mut line))
-            .await
-            .map_err(|_| anyhow!("codex read timeout after {timeout_ms}ms"))?
-            .context("failed to read codex output")?;
+        let count = timeout(
+            Duration::from_millis(timeout_ms),
+            self.stdout.read_line(&mut line),
+        )
+        .await
+        .map_err(|_| anyhow!("codex read timeout after {timeout_ms}ms"))?
+        .context("failed to read codex output")?;
         if count == 0 {
             let status = self.child.wait().await.ok();
             bail!("codex app-server exited unexpectedly: {status:?}");
         }
+        self.append_stdout_log(&line).await?;
         Ok(line)
+    }
+
+    async fn append_stdout_log(&self, line: &str) -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.stdout_log_path)
+            .await
+            .with_context(|| format!("failed to open {}", self.stdout_log_path.display()))?;
+        file.write_all(line.as_bytes()).await?;
+        Ok(())
     }
 
     async fn send(&mut self, value: Value) -> Result<()> {
@@ -334,5 +449,61 @@ fn summarize_payload(payload: &Value) -> Option<String> {
         .and_then(|msg| msg.get("content"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| payload.get("method").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            payload
+                .get("method")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn command_from_payload(payload: &Value) -> Option<String> {
+    find_first_string(payload, &["command", "cmd", "rawCommand", "raw_command"])
+}
+
+fn file_from_payload(payload: &Value) -> Option<String> {
+    find_first_string(
+        payload,
+        &["filePath", "file_path", "path", "targetPath", "target_path"],
+    )
+}
+
+fn infer_phase(method: &str, payload: &Value) -> Option<RunPhase> {
+    let command = command_from_payload(payload)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if command.contains("cargo test")
+        || command.contains("cargo clippy")
+        || command.contains("cargo check")
+        || command.contains("pytest")
+        || command.contains("npm test")
+    {
+        Some(RunPhase::Testing)
+    } else if method.contains("commandExecution") {
+        Some(RunPhase::Editing)
+    } else if method.contains("fileChange") {
+        Some(RunPhase::Editing)
+    } else if method.contains("turn/completed") {
+        Some(RunPhase::Waiting)
+    } else {
+        None
+    }
+}
+
+fn find_first_string(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(text) = map.get(*key).and_then(Value::as_str) {
+                    if !text.trim().is_empty() {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+            map.values()
+                .find_map(|child| find_first_string(child, keys))
+        }
+        Value::Array(items) => items.iter().find_map(|item| find_first_string(item, keys)),
+        _ => None,
+    }
 }

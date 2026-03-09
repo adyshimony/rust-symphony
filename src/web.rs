@@ -1,13 +1,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use chrono::Utc;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::Utc;
 use futures_util::StreamExt;
 use tokio::sync::watch;
 
@@ -24,11 +24,17 @@ struct WebState {
     config: Arc<ServiceConfig>,
 }
 
-pub async fn spawn_server(config: Arc<ServiceConfig>, orchestrator: OrchestratorHandle) -> anyhow::Result<()> {
+pub async fn spawn_server(
+    config: Arc<ServiceConfig>,
+    orchestrator: OrchestratorHandle,
+) -> anyhow::Result<()> {
     let Some(port) = config.server_port else {
         return Ok(());
     };
-    let state = WebState { orchestrator, config: config.clone() };
+    let state = WebState {
+        orchestrator,
+        config: config.clone(),
+    };
     let app = Router::new()
         .route("/", get(index))
         .route("/dashboard.css", get(styles))
@@ -36,12 +42,30 @@ pub async fn spawn_server(config: Arc<ServiceConfig>, orchestrator: Orchestrator
         .route("/ws", get(ws))
         .route("/api/v1/state", get(state_api))
         .route("/api/v1/refresh", post(refresh_api))
+        .route(
+            "/api/v1/issues/{issue_identifier}/pause",
+            post(pause_issue_api),
+        )
+        .route(
+            "/api/v1/issues/{issue_identifier}/resume",
+            post(resume_issue_api),
+        )
+        .route(
+            "/api/v1/issues/{issue_identifier}/stop",
+            post(stop_issue_api),
+        )
+        .route(
+            "/api/v1/issues/{issue_identifier}/retry",
+            post(retry_issue_api),
+        )
         .route("/api/v1/{issue_identifier}", get(issue_api))
         .fallback(not_found)
         .with_state(state);
     let addr: SocketAddr = format!("{}:{port}", config.server_host).parse()?;
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(addr).await.expect("bind web listener");
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("bind web listener");
         axum::serve(listener, app).await.expect("serve web ui");
     });
     Ok(())
@@ -53,7 +77,12 @@ async fn index(State(state): State<WebState>) -> Html<String> {
 }
 
 async fn styles() -> Response {
-    (StatusCode::OK, [("content-type", "text/css")], DASHBOARD_CSS).into_response()
+    (
+        StatusCode::OK,
+        [("content-type", "text/css")],
+        DASHBOARD_CSS,
+    )
+        .into_response()
 }
 
 async fn script() -> Response {
@@ -76,7 +105,38 @@ async fn state_api(State(state): State<WebState>) -> Json<presenter::StatePayloa
 
 async fn refresh_api(State(state): State<WebState>) -> impl IntoResponse {
     let refresh = state.orchestrator.request_refresh().await;
-    (StatusCode::ACCEPTED, Json(presenter::refresh_payload(refresh)))
+    (
+        StatusCode::ACCEPTED,
+        Json(presenter::refresh_payload(refresh)),
+    )
+}
+
+async fn pause_issue_api(
+    Path(issue_identifier): Path<String>,
+    State(state): State<WebState>,
+) -> impl IntoResponse {
+    control_response(state.orchestrator.pause_issue(issue_identifier).await)
+}
+
+async fn resume_issue_api(
+    Path(issue_identifier): Path<String>,
+    State(state): State<WebState>,
+) -> impl IntoResponse {
+    control_response(state.orchestrator.resume_issue(issue_identifier).await)
+}
+
+async fn stop_issue_api(
+    Path(issue_identifier): Path<String>,
+    State(state): State<WebState>,
+) -> impl IntoResponse {
+    control_response(state.orchestrator.stop_issue(issue_identifier).await)
+}
+
+async fn retry_issue_api(
+    Path(issue_identifier): Path<String>,
+    State(state): State<WebState>,
+) -> impl IntoResponse {
+    control_response(state.orchestrator.retry_issue(issue_identifier).await)
 }
 
 async fn issue_api(
@@ -103,6 +163,15 @@ async fn not_found() -> impl IntoResponse {
             "error": { "code": "not_found", "message": "Route not found" }
         })),
     )
+}
+
+fn control_response(result: crate::model::ControlActionResult) -> impl IntoResponse {
+    let status = match result.status {
+        crate::model::ControlActionStatus::Accepted => StatusCode::ACCEPTED,
+        crate::model::ControlActionStatus::NotFound => StatusCode::NOT_FOUND,
+        crate::model::ControlActionStatus::Conflict => StatusCode::CONFLICT,
+    };
+    (status, Json(presenter::control_payload(result)))
 }
 
 async fn websocket_loop(mut socket: WebSocket, mut rx: watch::Receiver<crate::model::Snapshot>) {
@@ -144,26 +213,35 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         .map(|entry| {
             let health = run_health(entry);
             format!(
-                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><span class="issue-title">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><div class="detail-stack"><span class="state-text">{}</span><span class="health-chip {}">{}</span></div></td><td><div class="detail-stack"><span>{}</span><span class="muted">Last update {}</span><span class="muted">Idle {}</span></div></td><td><div class="detail-stack"><span>PID {} · turn {}</span><span class="muted mono">session {}</span><span class="muted mono">thread {}</span></div></td><td><div class="detail-stack"><span class="event-text">{}</span><span class="muted">{}</span></div></td><td><div class="token-stack numeric"><span>Total: {}</span><span class="muted">In {} / Out {}</span><span class="muted workspace-path">{}</span>{}</div></td></tr>"#,
+                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><span class="issue-title">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><div class="detail-stack"><span class="state-text">{}</span><span class="health-chip {}">{}</span><span class="muted">phase {}</span></div></td><td><div class="detail-stack"><span>{}</span><span class="muted">Last update {}</span><span class="muted">Idle {}</span><span class="muted">{}</span></div></td><td><div class="detail-stack"><span>PID {} · turn {}</span><span class="muted mono">session {}</span><span class="muted mono">thread {}</span></div></td><td><div class="detail-stack"><span class="event-text">{}</span><span class="muted">{}</span><span class="muted mono">cmd {}</span><span class="muted mono">file {}</span></div></td><td><div class="token-stack numeric"><span>Total: {}</span><span class="muted">In {} / Out {}</span><span class="muted">diff {} +{} -{}</span><span class="muted workspace-path">{}</span><span class="muted workspace-path">{}</span><span class="muted workspace-path">{}</span>{}</div></td></tr>"#,
                 escape_html(&entry.issue_identifier),
                 escape_html(&entry.issue_title),
                 issue_api_path(&entry.issue_identifier),
                 escape_html(&entry.state),
                 health.class_name,
                 health.label,
+                escape_html(&entry.phase),
                 format_runtime(&entry.started_at),
                 format_runtime(&entry.last_event_at),
                 format_idle(&entry.started_at, &entry.last_event_at),
+                escape_html(entry.phase_detail.as_deref().unwrap_or("n/a")),
                 escape_html(entry.codex_app_server_pid.as_deref().unwrap_or("n/a")),
                 entry.turn_count,
                 escape_html(entry.session_id.as_deref().unwrap_or("n/a")),
                 escape_html(entry.thread_id.as_deref().unwrap_or("n/a")),
                 escape_html(entry.last_event.as_deref().unwrap_or("n/a")),
                 escape_html(entry.last_message.as_deref().unwrap_or("n/a")),
+                escape_html(entry.last_command.as_deref().unwrap_or("n/a")),
+                escape_html(entry.last_file_touched.as_deref().unwrap_or("n/a")),
                 format_int(entry.tokens.total_tokens),
                 format_int(entry.tokens.input_tokens),
                 format_int(entry.tokens.output_tokens),
+                entry.diff.changed_files,
+                entry.diff.added_lines,
+                entry.diff.removed_lines,
                 escape_html(&entry.workspace_path),
+                escape_html(entry.stdout_log_path.as_deref().unwrap_or("n/a")),
+                escape_html(entry.progress_report_path.as_deref().unwrap_or("n/a")),
                 telemetry_warning_html(entry.tokens.total_tokens),
             )
         })
@@ -181,6 +259,29 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
                 entry.attempt,
                 escape_html(entry.due_at.as_deref().unwrap_or("n/a")),
                 escape_html(entry.error.as_deref().unwrap_or("n/a")),
+            )
+        })
+        .collect::<String>();
+    let review_rows = payload
+        .needs_review
+        .as_ref()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .map(|entry| {
+            format!(
+                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><span class="issue-title">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><div class="detail-stack"><span class="state-text">{}</span><span class="health-chip health-chip-stalled">{}</span></div></td><td><div class="detail-stack"><span>{}</span><span class="muted">{}</span></div></td><td><div class="detail-stack"><span class="muted mono">cmd {}</span><span class="muted mono">file {}</span><span class="muted">diff {} +{} -{}</span></div></td></tr>"#,
+                escape_html(&entry.issue_identifier),
+                escape_html(&entry.issue_title),
+                issue_api_path(&entry.issue_identifier),
+                escape_html(&entry.state),
+                escape_html(&entry.phase),
+                escape_html(entry.review_reason.as_deref().unwrap_or("review required")),
+                escape_html(entry.phase_detail.as_deref().unwrap_or("n/a")),
+                escape_html(entry.last_command.as_deref().unwrap_or("n/a")),
+                escape_html(entry.last_file_touched.as_deref().unwrap_or("n/a")),
+                entry.diff.changed_files,
+                entry.diff.added_lines,
+                entry.diff.removed_lines,
             )
         })
         .collect::<String>();
@@ -226,6 +327,7 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
       <section class="metric-grid">
         <article class="metric-card metric-card-running"><p class="metric-label">Running</p><p class="metric-value numeric" id="metric-running">{running}</p><p class="metric-detail">Active issue sessions in the current runtime.</p></article>
         <article class="metric-card metric-card-retrying"><p class="metric-label">Retrying</p><p class="metric-value numeric" id="metric-retrying">{retrying}</p><p class="metric-detail">Issues waiting for the next retry window.</p></article>
+        <article class="metric-card metric-card-runtime"><p class="metric-label">Needs Review</p><p class="metric-value numeric" id="metric-review">{needs_review}</p><p class="metric-detail">Runs paused for operator inspection.</p></article>
         <article class="metric-card metric-card-tokens"><p class="metric-label">Global tokens</p><p class="metric-value numeric" id="metric-total-tokens">{total_tokens}</p><p class="metric-detail numeric">In <span id="metric-input-tokens">{input_tokens}</span> / Out <span id="metric-output-tokens">{output_tokens}</span></p></article>
         <article class="metric-card metric-card-runtime"><p class="metric-label">Runtime</p><p class="metric-value numeric" id="metric-runtime">{runtime}</p><p class="metric-detail">Total Codex runtime across completed and active sessions.</p></article>
       </section>
@@ -236,8 +338,12 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
             <div class="monitor-alert" id="runtime-alert">{runtime_alert}</div>
           </section>
           <section class="section-card section-card-large">
-            <div class="section-header"><div><h2 class="section-title">Running sessions</h2><p class="section-copy">Active issues with status, idle time, session details, workspace path, and telemetry health.</p></div><div class="section-pill">{running} active</div></div>
+            <div class="section-header"><div><h2 class="section-title">Running sessions</h2><p class="section-copy">Active issues with phase, idle time, session details, workspace path, commands, diff stats, and telemetry health.</p></div><div class="section-pill">{running} active</div></div>
             <div class="table-wrap" id="running-wrap"><table class="data-table data-table-running"><thead><tr><th>Issue</th><th>Status</th><th>Timing</th><th>Session</th><th>Codex update</th><th>Tokens / workspace</th></tr></thead><tbody id="running-body" data-colspan="6">{running_rows}</tbody></table></div>
+          </section>
+          <section class="section-card">
+            <div class="section-header"><div><h2 class="section-title">Needs Review</h2><p class="section-copy">Runs paused by guardrails so you can inspect them before continuing.</p></div><div class="section-pill section-pill-warm">{needs_review} waiting</div></div>
+            <div class="table-wrap" id="review-wrap"><table class="data-table"><thead><tr><th>Issue</th><th>Status</th><th>Reason</th><th>Execution context</th></tr></thead><tbody id="review-body">{review_rows}</tbody></table></div>
           </section>
           <section class="section-card">
             <div class="section-header"><div><h2 class="section-title">Retry queue</h2><p class="section-copy">Issues waiting for the next retry window.</p></div><div class="section-pill section-pill-warm">{retrying} queued</div></div>
@@ -275,6 +381,7 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         generated_at = escape_html(&payload.generated_at),
         running = payload.counts.as_ref().map(|c| c.running).unwrap_or(0),
         retrying = payload.counts.as_ref().map(|c| c.retrying).unwrap_or(0),
+        needs_review = payload.counts.as_ref().map(|c| c.needs_review).unwrap_or(0),
         total_tokens = payload
             .codex_totals
             .as_ref()
@@ -293,10 +400,20 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         runtime = payload
             .codex_totals
             .as_ref()
-            .map(|totals| format!("{:.0}m {:.0}s", (totals.seconds_running / 60.0).floor(), totals.seconds_running % 60.0))
+            .map(|totals| format!(
+                "{:.0}m {:.0}s",
+                (totals.seconds_running / 60.0).floor(),
+                totals.seconds_running % 60.0
+            ))
             .unwrap_or_else(|| "0m 0s".to_string()),
-        runtime_alert = escape_html(&runtime_alert(payload.running.as_ref().unwrap_or(&Vec::new()))),
-        rate_limits = escape_html(&serde_json::to_string_pretty(&payload.rate_limits).unwrap_or_else(|_| "null".to_string())),
+        runtime_alert = escape_html(&runtime_alert(
+            payload.running.as_ref().unwrap_or(&Vec::new()),
+            payload.needs_review.as_ref().unwrap_or(&Vec::new())
+        )),
+        rate_limits = escape_html(
+            &serde_json::to_string_pretty(&payload.rate_limits)
+                .unwrap_or_else(|_| "null".to_string())
+        ),
         running_rows = running_rows,
         retry_rows = retry_rows,
         state_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
@@ -365,7 +482,10 @@ fn project_context_label(config: &ServiceConfig) -> &'static str {
 fn issue_api_path(issue_identifier: &str) -> String {
     format!(
         "/api/v1/{}",
-        issue_identifier.replace('%', "%25").replace('/', "%2F").replace('#', "%23")
+        issue_identifier
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace('#', "%23")
     )
 }
 
@@ -473,8 +593,13 @@ fn telemetry_warning_html(total_tokens: u64) -> String {
     }
 }
 
-fn runtime_alert(entries: &[presenter::RunningEntryPayload]) -> String {
-    if entries.is_empty() {
+fn runtime_alert(
+    entries: &[presenter::RunningEntryPayload],
+    review_entries: &[presenter::BlockedEntryPayload],
+) -> String {
+    if !review_entries.is_empty() {
+        "At least one run is paused for operator review.".to_string()
+    } else if entries.is_empty() {
         "No active runs. The runtime is currently idle.".to_string()
     } else if entries
         .iter()
@@ -485,5 +610,40 @@ fn runtime_alert(entries: &[presenter::RunningEntryPayload]) -> String {
         "At least one run has started but has not reported token usage yet.".to_string()
     } else {
         "Live run telemetry is streaming normally.".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    use super::control_response;
+    use crate::model::{ControlActionResult, ControlActionStatus};
+
+    #[test]
+    fn control_response_maps_status_codes() {
+        let accepted = control_response(ControlActionResult {
+            status: ControlActionStatus::Accepted,
+            issue_identifier: "repo#1".to_string(),
+            message: "ok".to_string(),
+        })
+        .into_response();
+        let not_found = control_response(ControlActionResult {
+            status: ControlActionStatus::NotFound,
+            issue_identifier: "repo#1".to_string(),
+            message: "missing".to_string(),
+        })
+        .into_response();
+        let conflict = control_response(ControlActionResult {
+            status: ControlActionStatus::Conflict,
+            issue_identifier: "repo#1".to_string(),
+            message: "bad".to_string(),
+        })
+        .into_response();
+
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 }
