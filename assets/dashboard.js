@@ -28,8 +28,48 @@
     });
   }
 
+  function parseTimestampMs(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.getTime();
+  }
+
+  function formatDurationSeconds(totalSeconds) {
+    const secs = Math.max(0, Math.floor(totalSeconds || 0));
+    const hours = Math.floor(secs / 3600);
+    const mins = Math.floor((secs % 3600) / 60);
+    const rem = secs % 60;
+    if (hours > 0) return `${hours}h ${mins}m ${rem}s`;
+    if (mins > 0) return `${mins}m ${rem}s`;
+    return `${rem}s`;
+  }
+
+  function runHealth(entry) {
+    const startedMs = parseTimestampMs(entry.started_at);
+    const lastMs = parseTimestampMs(entry.last_event_at) || startedMs;
+    const idleSeconds = lastMs ? (Date.now() - lastMs) / 1000 : 0;
+    if (!entry.last_event_at) return { label: "starting", className: "health-chip-starting" };
+    if (idleSeconds >= 300) return { label: "stalled?", className: "health-chip-stalled" };
+    if ((entry.tokens?.total_tokens || 0) === 0) return { label: "active/no-usage", className: "health-chip-no-usage" };
+    return { label: "active", className: "health-chip-active" };
+  }
+
+  function idleText(entry) {
+    const startedMs = parseTimestampMs(entry.started_at);
+    const lastMs = parseTimestampMs(entry.last_event_at) || startedMs;
+    if (!lastMs) return "n/a";
+    return formatDurationSeconds((Date.now() - lastMs) / 1000);
+  }
+
+  function telemetryWarning(entry) {
+    return (entry.tokens?.total_tokens || 0) === 0
+      ? `<span class="warning-text">No token telemetry yet</span>`
+      : "";
+  }
+
   function issueCell(identifier) {
-    return `<div class="issue-stack"><span class="issue-id">${identifier}</span><a class="issue-link" href="/api/v1/${identifier}">JSON details</a></div>`;
+    return `<div class="issue-stack"><span class="issue-id">${identifier}</span><a class="issue-link" href="/api/v1/${encodeURIComponent(identifier)}">JSON details</a></div>`;
   }
 
   function sessionCell(sessionId) {
@@ -64,15 +104,27 @@
     document.getElementById("metric-runtime").textContent = formatRuntime(totals.seconds_running);
     document.getElementById("generated-at").textContent = formatTimestamp(payload.generated_at);
     document.getElementById("rate-limits").textContent = JSON.stringify(payload.rate_limits, null, 2);
+    const runtimeAlert = document.getElementById("runtime-alert");
+    if (runtimeAlert) {
+      if ((payload.running || []).length === 0) {
+        runtimeAlert.textContent = "No active runs. The runtime is currently idle.";
+      } else if ((payload.running || []).some((entry) => runHealth(entry).label === "stalled?")) {
+        runtimeAlert.textContent = "At least one run looks stalled: last Codex update is older than 5 minutes.";
+      } else if ((payload.running || []).some((entry) => (entry.tokens?.total_tokens || 0) === 0)) {
+        runtimeAlert.textContent = "At least one run has started but has not reported token usage yet.";
+      } else {
+        runtimeAlert.textContent = "Live run telemetry is streaming normally.";
+      }
+    }
 
     const runningRows = (payload.running || []).map((entry) => `
       <tr>
-        <td>${issueCell(entry.issue_identifier)}</td>
-        <td><span class="state-text">${entry.state}</span></td>
-        <td>${sessionCell(entry.session_id)}</td>
-        <td class="numeric">${formatTimestamp(entry.started_at)}</td>
-        <td><div class="detail-stack"><span class="event-text">${entry.last_message || "n/a"}</span><span class="muted event-meta">${entry.last_event || "n/a"}${entry.last_event_at ? ` · ${formatTimestamp(entry.last_event_at)}` : ""}</span></div></td>
-        <td><div class="token-stack numeric"><span>Total: ${formatInt(entry.tokens.total_tokens)}</span><span class="muted">In ${formatInt(entry.tokens.input_tokens)} / Out ${formatInt(entry.tokens.output_tokens)}</span></div></td>
+        <td><div class="issue-stack"><span class="issue-id">${entry.issue_identifier}</span><span class="issue-title">${entry.issue_title || "Untitled issue"}</span><a class="issue-link" href="/api/v1/${encodeURIComponent(entry.issue_identifier)}">JSON details</a></div></td>
+        <td><div class="detail-stack"><span class="state-text">${entry.state}</span><span class="health-chip ${runHealth(entry).className}">${runHealth(entry).label}</span></div></td>
+        <td><div class="detail-stack"><span>${formatTimestamp(entry.started_at)}</span><span class="muted">Last update ${formatTimestamp(entry.last_event_at)}</span><span class="muted">Idle ${idleText(entry)}</span></div></td>
+        <td><div class="detail-stack"><span>PID ${entry.codex_app_server_pid || "n/a"} · turn ${entry.turn_count ?? 0}</span><span class="muted mono">session ${entry.session_id || "n/a"}</span><span class="muted mono">thread ${entry.thread_id || "n/a"}</span></div></td>
+        <td><div class="detail-stack"><span class="event-text">${entry.last_event || "n/a"}</span><span class="muted">${entry.last_message || "n/a"}</span></div></td>
+        <td><div class="token-stack numeric"><span>Total: ${formatInt(entry.tokens.total_tokens)}</span><span class="muted">In ${formatInt(entry.tokens.input_tokens)} / Out ${formatInt(entry.tokens.output_tokens)}</span><span class="muted workspace-path">${entry.workspace_path || "n/a"}</span>${telemetryWarning(entry)}</div></td>
       </tr>
     `);
 

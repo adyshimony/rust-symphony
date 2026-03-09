@@ -2,6 +2,7 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -62,9 +63,9 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(9),
-            Constraint::Min(10),
-            Constraint::Length(8),
+            Constraint::Length(11),
+            Constraint::Min(14),
+            Constraint::Length(10),
         ])
         .split(frame.area());
 
@@ -95,14 +96,23 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
 
 fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
     let mut lines = Vec::new();
+    let total_agents = snapshot.running.len() + snapshot.retrying.len();
+    let telemetry_missing = snapshot.running.iter().any(|entry| {
+        entry.session.codex_total_tokens == 0 && entry.session.last_codex_timestamp.is_some()
+    });
     lines.push(Line::from(vec![
-        Span::styled("Agents: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Workload: ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("{}", snapshot.running.len()),
+            format!("running {}", snapshot.running.len()),
             Style::default().fg(Color::Green),
         ),
-        Span::raw("/"),
-        Span::raw("?"),
+        Span::raw(" | "),
+        Span::styled(
+            format!("retrying {}", snapshot.retrying.len()),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" | "),
+        Span::raw(format!("tracked {}", total_agents)),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Runtime: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -116,7 +126,10 @@ fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Tokens: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Global tokens: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!(
                 "in {} | out {} | total {}",
@@ -125,6 +138,47 @@ fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
                 snapshot.codex_totals.total_tokens
             ),
             Style::default().fg(Color::Yellow),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Per-run tokens: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(
+            if snapshot.running.is_empty() {
+                "n/a".to_string()
+            } else {
+                snapshot
+                    .running
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "{}={}",
+                            truncate(&entry.identifier, 20),
+                            entry.session.codex_total_tokens
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            },
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Telemetry: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if telemetry_missing {
+                "Codex usage has not been reported yet for at least one active run"
+            } else if snapshot.running.is_empty() {
+                "idle"
+            } else {
+                "streaming"
+            },
+            Style::default().fg(if telemetry_missing {
+                Color::LightRed
+            } else {
+                Color::Green
+            }),
         ),
     ]));
     lines.push(Line::from(vec![
@@ -157,8 +211,6 @@ fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
 
 fn running_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
     let mut lines = Vec::new();
-    lines.push(Line::from("ID        STAGE          PID      AGE/TURN     TOKENS     SESSION        EVENT"));
-    lines.push(Line::from("-------------------------------------------------------------------------------"));
     if snapshot.running.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "No active agents",
@@ -166,47 +218,147 @@ fn running_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
         )]));
     } else {
         for entry in &snapshot.running {
-            lines.push(Line::from(format!(
-                "{:<8}  {:<14}  {:<8}  {:<11}  {:>8}  {:<12}  {}",
-                truncate(&entry.identifier, 8),
-                truncate(&entry.state, 14),
-                truncate(entry.session.codex_app_server_pid.as_deref().unwrap_or("n/a"), 8),
-                format!(
-                    "{:.0}m/{:02}",
-                    ((chrono::Utc::now() - entry.started_at).num_seconds().max(0) as f64 / 60.0).floor(),
-                    entry.session.turn_count
+            let last_seen = entry.session.last_codex_timestamp.unwrap_or(entry.started_at);
+            let idle_secs = (Utc::now() - last_seen).num_seconds().max(0);
+            let age_secs = (Utc::now() - entry.started_at).num_seconds().max(0);
+            let status = classify_run(entry);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    truncate(&entry.identifier, 48),
+                    Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan),
                 ),
-                entry.session.codex_total_tokens,
-                truncate(entry.session.session_id.as_deref().unwrap_or("n/a"), 12),
-                truncate(entry.session.last_codex_message.as_deref().unwrap_or(entry.session.last_codex_event.as_deref().unwrap_or("n/a")), 48),
+                Span::raw("  "),
+                Span::styled(status, Style::default().fg(status_color(status))),
+                Span::raw("  "),
+                Span::raw(format!("state {}", entry.state)),
+            ]));
+            lines.push(Line::from(format!(
+                "  title={} ",
+                truncate(&entry.issue.title, 108),
             )));
+            lines.push(Line::from(format!(
+                "  age={}  idle={}  turn={}  pid={}  tokens=in {} / out {} / total {}",
+                human_duration(age_secs),
+                human_duration(idle_secs),
+                entry.session.turn_count,
+                entry.session.codex_app_server_pid.as_deref().unwrap_or("n/a"),
+                entry.session.codex_input_tokens,
+                entry.session.codex_output_tokens,
+                entry.session.codex_total_tokens,
+            )));
+            lines.push(Line::from(format!(
+                "  started={}  last_update={}",
+                format_timestamp(entry.started_at),
+                format_timestamp(last_seen),
+            )));
+            lines.push(Line::from(format!(
+                "  session={}  thread={}  turn_id={}",
+                truncate(entry.session.session_id.as_deref().unwrap_or("n/a"), 40),
+                truncate(entry.session.thread_id.as_deref().unwrap_or("n/a"), 28),
+                truncate(entry.session.turn_id.as_deref().unwrap_or("n/a"), 28),
+            )));
+            lines.push(Line::from(format!(
+                "  workspace={}",
+                truncate(&entry.workspace_path, 108),
+            )));
+            lines.push(Line::from(format!(
+                "  event={}  message={}",
+                truncate(entry.session.last_codex_event.as_deref().unwrap_or("n/a"), 32),
+                truncate(
+                    entry.session
+                        .last_codex_message
+                        .as_deref()
+                        .unwrap_or("n/a"),
+                    96,
+                ),
+            )));
+            if entry.session.codex_total_tokens == 0 {
+                lines.push(Line::from(vec![Span::styled(
+                    "  warning=no token usage reported yet; this may mean Codex is still starting or usage telemetry is missing",
+                    Style::default().fg(Color::LightRed),
+                )]));
+            }
+            lines.push(Line::from(""));
         }
     }
     Text::from(lines)
 }
 
 fn retry_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
+    let mut lines = Vec::new();
     if snapshot.retrying.is_empty() {
-        Text::from(Line::from(vec![Span::styled(
+        lines.push(Line::from(vec![Span::styled(
             "No queued retries",
             Style::default().fg(Color::DarkGray),
-        )]))
+        )]));
     } else {
-        Text::from(
-            snapshot
-                .retrying
-                .iter()
-                .map(|entry| {
-                    Line::from(format!(
-                        "↻ {} attempt={} due={} error={}",
-                        entry.identifier,
-                        entry.attempt,
-                        entry.due_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                        truncate(entry.error.as_deref().unwrap_or("n/a"), 96)
-                    ))
-                })
-                .collect::<Vec<_>>(),
-        )
+        for entry in &snapshot.retrying {
+            let due_in_secs = (entry.due_at - Utc::now()).num_seconds().max(0);
+            lines.push(Line::from(vec![
+                Span::styled("↻ ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    truncate(&entry.identifier, 48),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "  attempt={}  due_in={}  due_at={}",
+                    entry.attempt,
+                    human_duration(due_in_secs),
+                    format_timestamp(entry.due_at),
+                )),
+            ]));
+            lines.push(Line::from(format!(
+                "  error={}",
+                truncate(entry.error.as_deref().unwrap_or("n/a"), 108)
+            )));
+        }
+    }
+    Text::from(lines)
+}
+
+fn classify_run(entry: &crate::model::RunningEntry) -> &'static str {
+    let idle_secs = (Utc::now()
+        - entry
+            .session
+            .last_codex_timestamp
+            .unwrap_or(entry.started_at))
+    .num_seconds()
+    .max(0);
+    if entry.session.last_codex_timestamp.is_none() {
+        "starting"
+    } else if idle_secs >= 300 {
+        "stalled?"
+    } else if entry.session.codex_total_tokens == 0 {
+        "active/no-usage"
+    } else {
+        "active"
+    }
+}
+
+fn status_color(status: &str) -> Color {
+    match status {
+        "starting" => Color::Yellow,
+        "stalled?" => Color::LightRed,
+        "active/no-usage" => Color::Magenta,
+        _ => Color::Green,
+    }
+}
+
+fn format_timestamp(value: DateTime<Utc>) -> String {
+    value.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+}
+
+fn human_duration(total_secs: i64) -> String {
+    let secs = total_secs.max(0);
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let rem = secs % 60;
+    if hours > 0 {
+        format!("{hours}h {mins}m {rem}s")
+    } else if mins > 0 {
+        format!("{mins}m {rem}s")
+    } else {
+        format!("{rem}s")
     }
 }
 

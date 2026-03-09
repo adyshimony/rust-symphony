@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use chrono::Utc;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -141,22 +142,29 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         .unwrap_or(&Vec::new())
         .iter()
         .map(|entry| {
+            let health = run_health(entry);
             format!(
-                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><span class="state-text">{}</span></td><td>{}</td><td class="numeric">{}</td><td><div class="detail-stack"><span class="event-text">{}</span><span class="muted event-meta">{}</span></div></td><td><div class="token-stack numeric"><span>Total: {}</span><span class="muted">In {} / Out {}</span></div></td></tr>"#,
+                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><span class="issue-title">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><div class="detail-stack"><span class="state-text">{}</span><span class="health-chip {}">{}</span></div></td><td><div class="detail-stack"><span>{}</span><span class="muted">Last update {}</span><span class="muted">Idle {}</span></div></td><td><div class="detail-stack"><span>PID {} · turn {}</span><span class="muted mono">session {}</span><span class="muted mono">thread {}</span></div></td><td><div class="detail-stack"><span class="event-text">{}</span><span class="muted">{}</span></div></td><td><div class="token-stack numeric"><span>Total: {}</span><span class="muted">In {} / Out {}</span><span class="muted workspace-path">{}</span>{}</div></td></tr>"#,
                 escape_html(&entry.issue_identifier),
-                escape_html(&entry.issue_identifier),
+                escape_html(&entry.issue_title),
+                issue_api_path(&entry.issue_identifier),
                 escape_html(&entry.state),
-                entry
-                    .session_id
-                    .as_deref()
-                    .map(session_text)
-                    .unwrap_or_else(|| "<span class=\"muted\">n/a</span>".to_string()),
+                health.class_name,
+                health.label,
                 format_runtime(&entry.started_at),
-                escape_html(entry.last_message.as_deref().unwrap_or("n/a")),
+                format_runtime(&entry.last_event_at),
+                format_idle(&entry.started_at, &entry.last_event_at),
+                escape_html(entry.codex_app_server_pid.as_deref().unwrap_or("n/a")),
+                entry.turn_count,
+                escape_html(entry.session_id.as_deref().unwrap_or("n/a")),
+                escape_html(entry.thread_id.as_deref().unwrap_or("n/a")),
                 escape_html(entry.last_event.as_deref().unwrap_or("n/a")),
+                escape_html(entry.last_message.as_deref().unwrap_or("n/a")),
                 format_int(entry.tokens.total_tokens),
                 format_int(entry.tokens.input_tokens),
                 format_int(entry.tokens.output_tokens),
+                escape_html(&entry.workspace_path),
+                telemetry_warning_html(entry.tokens.total_tokens),
             )
         })
         .collect::<String>();
@@ -218,14 +226,18 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
       <section class="metric-grid">
         <article class="metric-card metric-card-running"><p class="metric-label">Running</p><p class="metric-value numeric" id="metric-running">{running}</p><p class="metric-detail">Active issue sessions in the current runtime.</p></article>
         <article class="metric-card metric-card-retrying"><p class="metric-label">Retrying</p><p class="metric-value numeric" id="metric-retrying">{retrying}</p><p class="metric-detail">Issues waiting for the next retry window.</p></article>
-        <article class="metric-card metric-card-tokens"><p class="metric-label">Total tokens</p><p class="metric-value numeric" id="metric-total-tokens">{total_tokens}</p><p class="metric-detail numeric">In <span id="metric-input-tokens">{input_tokens}</span> / Out <span id="metric-output-tokens">{output_tokens}</span></p></article>
+        <article class="metric-card metric-card-tokens"><p class="metric-label">Global tokens</p><p class="metric-value numeric" id="metric-total-tokens">{total_tokens}</p><p class="metric-detail numeric">In <span id="metric-input-tokens">{input_tokens}</span> / Out <span id="metric-output-tokens">{output_tokens}</span></p></article>
         <article class="metric-card metric-card-runtime"><p class="metric-label">Runtime</p><p class="metric-value numeric" id="metric-runtime">{runtime}</p><p class="metric-detail">Total Codex runtime across completed and active sessions.</p></article>
       </section>
       <section class="content-grid">
         <div class="content-primary">
+          <section class="section-card monitor-strip">
+            <div class="section-header"><div><h2 class="section-title">Runtime monitor</h2><p class="section-copy">Immediate health signals for active runs.</p></div></div>
+            <div class="monitor-alert" id="runtime-alert">{runtime_alert}</div>
+          </section>
           <section class="section-card section-card-large">
-            <div class="section-header"><div><h2 class="section-title">Running sessions</h2><p class="section-copy">Active issues, last known agent activity, and token usage.</p></div><div class="section-pill">{running} active</div></div>
-            <div class="table-wrap" id="running-wrap"><table class="data-table data-table-running"><thead><tr><th>Issue</th><th>State</th><th>Session</th><th>Started</th><th>Codex update</th><th>Tokens</th></tr></thead><tbody id="running-body">{running_rows}</tbody></table></div>
+            <div class="section-header"><div><h2 class="section-title">Running sessions</h2><p class="section-copy">Active issues with status, idle time, session details, workspace path, and telemetry health.</p></div><div class="section-pill">{running} active</div></div>
+            <div class="table-wrap" id="running-wrap"><table class="data-table data-table-running"><thead><tr><th>Issue</th><th>Status</th><th>Timing</th><th>Session</th><th>Codex update</th><th>Tokens / workspace</th></tr></thead><tbody id="running-body" data-colspan="6">{running_rows}</tbody></table></div>
           </section>
           <section class="section-card">
             <div class="section-header"><div><h2 class="section-title">Retry queue</h2><p class="section-copy">Issues waiting for the next retry window.</p></div><div class="section-pill section-pill-warm">{retrying} queued</div></div>
@@ -283,6 +295,7 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
             .as_ref()
             .map(|totals| format!("{:.0}m {:.0}s", (totals.seconds_running / 60.0).floor(), totals.seconds_running % 60.0))
             .unwrap_or_else(|| "0m 0s".to_string()),
+        runtime_alert = escape_html(&runtime_alert(payload.running.as_ref().unwrap_or(&Vec::new()))),
         rate_limits = escape_html(&serde_json::to_string_pretty(&payload.rate_limits).unwrap_or_else(|_| "null".to_string())),
         running_rows = running_rows,
         retry_rows = retry_rows,
@@ -349,12 +362,27 @@ fn project_context_label(config: &ServiceConfig) -> &'static str {
     }
 }
 
-fn session_text(session_id: &str) -> String {
-    format!(r#"<span class="session-text mono">{}</span>"#, escape_html(session_id))
+fn issue_api_path(issue_identifier: &str) -> String {
+    format!(
+        "/api/v1/{}",
+        issue_identifier.replace('%', "%25").replace('/', "%2F").replace('#', "%23")
+    )
 }
 
 fn format_runtime(started_at: &Option<String>) -> String {
     started_at.clone().unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_idle(started_at: &Option<String>, last_event_at: &Option<String>) -> String {
+    let started = started_at
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or_else(Utc::now);
+    let last = last_event_at
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or(started);
+    human_duration((Utc::now() - last).num_seconds().max(0))
 }
 
 fn format_int(value: u64) -> String {
@@ -375,4 +403,87 @@ fn escape_html(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn parse_rfc3339(value: &str) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn human_duration(total_secs: i64) -> String {
+    let secs = total_secs.max(0);
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let rem = secs % 60;
+    if hours > 0 {
+        format!("{hours}h {mins}m {rem}s")
+    } else if mins > 0 {
+        format!("{mins}m {rem}s")
+    } else {
+        format!("{rem}s")
+    }
+}
+
+struct RunHealth<'a> {
+    label: &'a str,
+    class_name: &'a str,
+}
+
+fn run_health(entry: &presenter::RunningEntryPayload) -> RunHealth<'static> {
+    let started = entry
+        .started_at
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or_else(Utc::now);
+    let last = entry
+        .last_event_at
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or(started);
+    let idle_secs = (Utc::now() - last).num_seconds().max(0);
+    if entry.last_event_at.is_none() {
+        RunHealth {
+            label: "starting",
+            class_name: "health-chip-starting",
+        }
+    } else if idle_secs >= 300 {
+        RunHealth {
+            label: "stalled?",
+            class_name: "health-chip-stalled",
+        }
+    } else if entry.tokens.total_tokens == 0 {
+        RunHealth {
+            label: "active/no-usage",
+            class_name: "health-chip-no-usage",
+        }
+    } else {
+        RunHealth {
+            label: "active",
+            class_name: "health-chip-active",
+        }
+    }
+}
+
+fn telemetry_warning_html(total_tokens: u64) -> String {
+    if total_tokens == 0 {
+        "<span class=\"warning-text\">No token telemetry yet</span>".to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn runtime_alert(entries: &[presenter::RunningEntryPayload]) -> String {
+    if entries.is_empty() {
+        "No active runs. The runtime is currently idle.".to_string()
+    } else if entries
+        .iter()
+        .any(|entry| run_health(entry).label == "stalled?")
+    {
+        "At least one run looks stalled: last Codex update is older than 5 minutes.".to_string()
+    } else if entries.iter().any(|entry| entry.tokens.total_tokens == 0) {
+        "At least one run has started but has not reported token usage yet.".to_string()
+    } else {
+        "Live run telemetry is streaming normally.".to_string()
+    }
 }

@@ -439,6 +439,10 @@ body[data-runtime-mode="demo"] #context-mode {
   padding: 16px;
 }
 
+.monitor-strip {
+  background: var(--panel-2);
+}
+
 .section-card-large {
   min-height: 450px;
 }
@@ -517,6 +521,66 @@ body[data-runtime-mode="demo"] #context-mode {
 .context-list {
   display: grid;
   gap: 0.3rem;
+}
+
+.issue-title {
+  color: var(--ink);
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.monitor-alert {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-strong);
+  background: rgba(8, 18, 17, 0.86);
+  padding: 12px 14px;
+  color: var(--ink);
+  font-size: 0.92rem;
+}
+
+.health-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.7rem;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  font-size: 0.74rem;
+  font-weight: 700;
+  width: fit-content;
+}
+
+.health-chip-active {
+  color: var(--accent);
+  background: rgba(11, 31, 25, 0.9);
+  border-color: rgba(84, 224, 174, 0.2);
+}
+
+.health-chip-starting {
+  color: var(--warning);
+  background: rgba(34, 26, 13, 0.9);
+  border-color: rgba(255, 197, 109, 0.18);
+}
+
+.health-chip-no-usage {
+  color: var(--info);
+  background: rgba(13, 24, 34, 0.9);
+  border-color: rgba(115, 184, 255, 0.2);
+}
+
+.health-chip-stalled {
+  color: var(--danger);
+  background: rgba(35, 17, 19, 0.92);
+  border-color: rgba(255, 138, 150, 0.2);
+}
+
+.workspace-path {
+  word-break: break-all;
+}
+
+.warning-text {
+  color: var(--warning);
+  font-size: 0.82rem;
 }
 
 .issue-id {
