@@ -272,7 +272,7 @@
     const reviewRows = (payload.needs_review || []).map((entry) => `
       <tr>
         <td>${issueCell(entry.issue_identifier, entry.issue_title)}</td>
-        <td><div class="detail-stack"><span class="state-text">${escapeHtml(entry.state)}</span><span class="health-chip health-chip-stalled">${escapeHtml(entry.phase || "needs_review")}</span></div></td>
+        <td><div class="detail-stack"><span class="state-text">${escapeHtml(entry.state)}</span><span class="health-chip health-chip-stalled">${escapeHtml(entry.phase || "needs_review")}</span><span class="muted">${escapeHtml(formatTimestamp(entry.blocked_at))}</span></div></td>
         <td><div class="detail-stack"><span>${escapeHtml(entry.review_reason || "review required")}</span><span class="muted">${escapeHtml(entry.phase_detail || "n/a")}</span></div></td>
         <td>${blockedContextCell(entry)}</td>
         <td>${actionsCell(entry.issue_identifier, [
