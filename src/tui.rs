@@ -19,6 +19,21 @@ use ratatui::{Frame, Terminal};
 
 use crate::orchestrator::OrchestratorHandle;
 
+#[derive(Default)]
+struct TuiState {
+    command_input: String,
+    command_status: String,
+}
+
+enum ParsedCommand {
+    Pause(String),
+    Resume(String),
+    Stop(String),
+    Retry(String),
+    Refresh,
+    Help,
+}
+
 pub async fn run(orchestrator: OrchestratorHandle) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -27,16 +42,37 @@ pub async fn run(orchestrator: OrchestratorHandle) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     let mut events = EventStream::new();
     let mut snapshot_rx = orchestrator.subscribe();
+    let mut tui_state = TuiState {
+        command_status: "Type `help` for commands. Press Esc to clear the current input.".to_string(),
+        ..Default::default()
+    };
     loop {
         let snapshot = snapshot_rx.borrow().clone();
-        terminal.draw(|frame| render(frame, &snapshot))?;
+        terminal.draw(|frame| render(frame, &snapshot, &tui_state))?;
 
         tokio::select! {
             maybe_event = events.next() => {
                 if let Some(Ok(Event::Key(key))) = maybe_event {
-                    if key.code == KeyCode::Char('q')
-                        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+                    if key.code == KeyCode::Char('q') && tui_state.command_input.is_empty() {
                         break;
+                    }
+                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        break;
+                    }
+                    match key.code {
+                        KeyCode::Esc => tui_state.command_input.clear(),
+                        KeyCode::Backspace => {
+                            tui_state.command_input.pop();
+                        }
+                        KeyCode::Enter => {
+                            let input = std::mem::take(&mut tui_state.command_input);
+                            tui_state.command_status =
+                                execute_command(&orchestrator, input).await;
+                        }
+                        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            tui_state.command_input.push(ch);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -60,15 +96,16 @@ fn restore_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<
     Ok(())
 }
 
-fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
+fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot, tui_state: &TuiState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(12),
             Constraint::Length(10),
-            Constraint::Min(14),
-            Constraint::Length(8),
+            Constraint::Min(12),
             Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(5),
         ])
         .split(frame.area());
 
@@ -104,10 +141,14 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
         layout[2],
     );
 
-    let review = review_text(snapshot);
+    let blocked = blocked_text(snapshot);
     frame.render_widget(
-        Paragraph::new(review)
-            .block(Block::default().title("Needs Review").borders(Borders::ALL))
+        Paragraph::new(blocked)
+            .block(
+                Block::default()
+                    .title("Paused / Held / Review")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
         layout[3],
     );
@@ -122,6 +163,14 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot) {
             )
             .wrap(Wrap { trim: true }),
         layout[4],
+    );
+
+    let command = command_text(tui_state);
+    frame.render_widget(
+        Paragraph::new(command)
+            .block(Block::default().title("Command").borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        layout[5],
     );
 }
 
@@ -150,6 +199,16 @@ fn header_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
         Span::styled(
             format!("review {}", snapshot.needs_review.len()),
             Style::default().fg(Color::LightRed),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("paused {}", snapshot.paused.len()),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("held {}", snapshot.held.len()),
+            Style::default().fg(Color::Magenta),
         ),
         Span::raw(" | "),
         Span::raw(format!("tracked {}", total_agents)),
@@ -382,52 +441,66 @@ fn running_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
     Text::from(lines)
 }
 
-fn review_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
+fn blocked_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
     let mut lines = Vec::new();
-    if snapshot.needs_review.is_empty() {
+    if snapshot.paused.is_empty() && snapshot.held.is_empty() && snapshot.needs_review.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "No review-blocked runs",
+            "No paused, held, or review-blocked runs",
             Style::default().fg(Color::DarkGray),
         )]));
     } else {
+        for entry in &snapshot.paused {
+            blocked_entry_lines(&mut lines, "paused", Color::Yellow, entry);
+        }
+        for entry in &snapshot.held {
+            blocked_entry_lines(&mut lines, "held", Color::Magenta, entry);
+        }
         for entry in &snapshot.needs_review {
-            lines.push(Line::from(vec![
-                Span::styled("! ", Style::default().fg(Color::LightRed)),
-                Span::styled(
-                    truncate(&entry.identifier, 48),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!(
-                    "  phase={}  blocked_at={}",
-                    phase_label(&entry.telemetry.phase),
-                    format_timestamp(entry.blocked_at),
-                )),
-            ]));
-            lines.push(Line::from(format!(
-                "  reason={}",
-                truncate(
-                    entry.telemetry.review_reason.as_deref().unwrap_or("n/a"),
-                    108
-                ),
-            )));
-            lines.push(Line::from(format!(
-                "  command={}  file={}  diff=files {} +{} -{}",
-                truncate(entry.telemetry.last_command.as_deref().unwrap_or("n/a"), 48),
-                truncate(
-                    entry
-                        .telemetry
-                        .last_file_touched
-                        .as_deref()
-                        .unwrap_or("n/a"),
-                    48
-                ),
-                entry.telemetry.diff.changed_files,
-                entry.telemetry.diff.added_lines,
-                entry.telemetry.diff.removed_lines,
-            )));
+            blocked_entry_lines(&mut lines, "review", Color::LightRed, entry);
         }
     }
     Text::from(lines)
+}
+
+fn blocked_entry_lines(
+    lines: &mut Vec<Line<'static>>,
+    kind: &str,
+    color: Color,
+    entry: &crate::model::BlockedEntry,
+) {
+    lines.push(Line::from(vec![
+        Span::styled(format!("{kind} "), Style::default().fg(color)),
+        Span::styled(
+            truncate(&entry.identifier, 48),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            "  phase={}  blocked_at={}",
+            phase_label(&entry.telemetry.phase),
+            format_timestamp(entry.blocked_at),
+        )),
+    ]));
+    let reason = entry
+        .telemetry
+        .review_reason
+        .as_deref()
+        .or(entry.telemetry.phase_detail.as_deref())
+        .unwrap_or("n/a");
+    lines.push(Line::from(format!("  reason={}", truncate(reason, 108))));
+    lines.push(Line::from(format!(
+        "  command={}  file={}  diff=files {} +{} -{}",
+        truncate(entry.telemetry.last_command.as_deref().unwrap_or("n/a"), 48),
+        truncate(
+            entry.telemetry
+                .last_file_touched
+                .as_deref()
+                .unwrap_or("n/a"),
+            48
+        ),
+        entry.telemetry.diff.changed_files,
+        entry.telemetry.diff.added_lines,
+        entry.telemetry.diff.removed_lines,
+    )));
 }
 
 fn log_tail_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
@@ -532,6 +605,93 @@ fn retry_text(snapshot: &crate::model::Snapshot) -> Text<'static> {
     Text::from(lines)
 }
 
+fn command_text(tui_state: &TuiState) -> Text<'static> {
+    let prompt = if tui_state.command_input.is_empty() {
+        "pause <issue> | resume <issue> | stop <issue> | retry <issue> | refresh | help"
+            .to_string()
+    } else {
+        tui_state.command_input.clone()
+    };
+    Text::from(vec![
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::raw(prompt),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("last: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(tui_state.command_status.clone()),
+        ]),
+    ])
+}
+
+async fn execute_command(orchestrator: &OrchestratorHandle, input: String) -> String {
+    match parse_command(&input) {
+        Ok(ParsedCommand::Pause(issue)) => control_result(orchestrator.pause_issue(issue).await),
+        Ok(ParsedCommand::Resume(issue)) => control_result(orchestrator.resume_issue(issue).await),
+        Ok(ParsedCommand::Stop(issue)) => control_result(orchestrator.stop_issue(issue).await),
+        Ok(ParsedCommand::Retry(issue)) => control_result(orchestrator.retry_issue(issue).await),
+        Ok(ParsedCommand::Refresh) => {
+            let refresh = orchestrator.request_refresh().await;
+            format!(
+                "refresh queued={} coalesced={} ops={}",
+                refresh.queued,
+                refresh.coalesced,
+                refresh.operations.join(",")
+            )
+        }
+        Ok(ParsedCommand::Help) => {
+            "commands: pause <issue>, resume <issue>, stop <issue>, retry <issue>, refresh, help"
+                .to_string()
+        }
+        Err(err) => err,
+    }
+}
+
+fn control_result(result: crate::model::ControlActionResult) -> String {
+    format!(
+        "{} {}: {}",
+        match result.status {
+            crate::model::ControlActionStatus::Accepted => "accepted",
+            crate::model::ControlActionStatus::NotFound => "not_found",
+            crate::model::ControlActionStatus::Conflict => "conflict",
+        },
+        result.issue_identifier,
+        result.message
+    )
+}
+
+fn parse_command(input: &str) -> std::result::Result<ParsedCommand, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("enter a command or type `help`".to_string());
+    }
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    let issue = parts.next();
+    if parts.next().is_some() {
+        return Err("too many arguments".to_string());
+    }
+    match command {
+        "pause" => issue
+            .map(|value| ParsedCommand::Pause(value.to_string()))
+            .ok_or_else(|| "usage: pause <issue_identifier>".to_string()),
+        "resume" => issue
+            .map(|value| ParsedCommand::Resume(value.to_string()))
+            .ok_or_else(|| "usage: resume <issue_identifier>".to_string()),
+        "stop" => issue
+            .map(|value| ParsedCommand::Stop(value.to_string()))
+            .ok_or_else(|| "usage: stop <issue_identifier>".to_string()),
+        "retry" => issue
+            .map(|value| ParsedCommand::Retry(value.to_string()))
+            .ok_or_else(|| "usage: retry <issue_identifier>".to_string()),
+        "refresh" if issue.is_none() => Ok(ParsedCommand::Refresh),
+        "help" if issue.is_none() => Ok(ParsedCommand::Help),
+        "refresh" | "help" => Err(format!("usage: {command}")),
+        _ => Err(format!("unknown command: {command}")),
+    }
+}
+
 fn classify_run(entry: &crate::model::RunningEntry) -> &'static str {
     let idle_secs = (Utc::now()
         - entry
@@ -608,4 +768,25 @@ fn tail_lines(contents: &str, lines: usize) -> String {
     }
     let collected = contents.lines().rev().take(lines).collect::<Vec<_>>();
     collected.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_command, ParsedCommand};
+
+    #[test]
+    fn parse_command_accepts_issue_commands() {
+        assert!(matches!(
+            parse_command("pause owner/repo#1"),
+            Ok(ParsedCommand::Pause(issue)) if issue == "owner/repo#1"
+        ));
+        assert!(matches!(parse_command("refresh"), Ok(ParsedCommand::Refresh)));
+    }
+
+    #[test]
+    fn parse_command_rejects_bad_input() {
+        assert!(parse_command("").is_err());
+        assert!(parse_command("stop").is_err());
+        assert!(parse_command("refresh now").is_err());
+    }
 }

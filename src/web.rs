@@ -323,86 +323,6 @@ async fn websocket_loop(mut socket: WebSocket, mut rx: watch::Receiver<crate::mo
 
 fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapshot) -> String {
     let payload = presenter::state_payload(Some(snapshot));
-    let running_rows = payload
-        .running
-        .as_ref()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .map(|entry| {
-            let health = run_health(entry);
-            format!(
-                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><span class="issue-title">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><div class="detail-stack"><span class="state-text">{}</span><span class="health-chip {}">{}</span><span class="muted">phase {}</span></div></td><td><div class="detail-stack"><span>{}</span><span class="muted">Last update {}</span><span class="muted">Idle {}</span><span class="muted">{}</span></div></td><td><div class="detail-stack"><span>PID {} · turn {}</span><span class="muted mono">session {}</span><span class="muted mono">thread {}</span></div></td><td><div class="detail-stack"><span class="event-text">{}</span><span class="muted">{}</span><span class="muted mono">cmd {}</span><span class="muted mono">file {}</span></div></td><td><div class="token-stack numeric"><span>Total: {}</span><span class="muted">In {} / Out {}</span><span class="muted">diff {} +{} -{}</span><span class="muted workspace-path">{}</span><span class="muted workspace-path">{}</span><span class="muted workspace-path">{}</span>{}</div></td></tr>"#,
-                escape_html(&entry.issue_identifier),
-                escape_html(&entry.issue_title),
-                issue_api_path(&entry.issue_identifier),
-                escape_html(&entry.state),
-                health.class_name,
-                health.label,
-                escape_html(&entry.phase),
-                format_runtime(&entry.started_at),
-                format_runtime(&entry.last_event_at),
-                format_idle(&entry.started_at, &entry.last_event_at),
-                escape_html(entry.phase_detail.as_deref().unwrap_or("n/a")),
-                escape_html(entry.codex_app_server_pid.as_deref().unwrap_or("n/a")),
-                entry.turn_count,
-                escape_html(entry.session_id.as_deref().unwrap_or("n/a")),
-                escape_html(entry.thread_id.as_deref().unwrap_or("n/a")),
-                escape_html(entry.last_event.as_deref().unwrap_or("n/a")),
-                escape_html(entry.last_message.as_deref().unwrap_or("n/a")),
-                escape_html(entry.last_command.as_deref().unwrap_or("n/a")),
-                escape_html(entry.last_file_touched.as_deref().unwrap_or("n/a")),
-                format_int(entry.tokens.total_tokens),
-                format_int(entry.tokens.input_tokens),
-                format_int(entry.tokens.output_tokens),
-                entry.diff.changed_files,
-                entry.diff.added_lines,
-                entry.diff.removed_lines,
-                escape_html(&entry.workspace_path),
-                escape_html(entry.stdout_log_path.as_deref().unwrap_or("n/a")),
-                escape_html(entry.progress_report_path.as_deref().unwrap_or("n/a")),
-                telemetry_warning_html(entry.tokens.total_tokens),
-            )
-        })
-        .collect::<String>();
-    let retry_rows = payload
-        .retrying
-        .as_ref()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .map(|entry| {
-            format!(
-                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td>{}</td><td class="mono">{}</td><td>{}</td></tr>"#,
-                escape_html(&entry.issue_identifier),
-                escape_html(&entry.issue_identifier),
-                entry.attempt,
-                escape_html(entry.due_at.as_deref().unwrap_or("n/a")),
-                escape_html(entry.error.as_deref().unwrap_or("n/a")),
-            )
-        })
-        .collect::<String>();
-    let review_rows = payload
-        .needs_review
-        .as_ref()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .map(|entry| {
-            format!(
-                r#"<tr><td><div class="issue-stack"><span class="issue-id">{}</span><span class="issue-title">{}</span><a class="issue-link" href="/api/v1/{}">JSON details</a></div></td><td><div class="detail-stack"><span class="state-text">{}</span><span class="health-chip health-chip-stalled">{}</span></div></td><td><div class="detail-stack"><span>{}</span><span class="muted">{}</span></div></td><td><div class="detail-stack"><span class="muted mono">cmd {}</span><span class="muted mono">file {}</span><span class="muted">diff {} +{} -{}</span></div></td></tr>"#,
-                escape_html(&entry.issue_identifier),
-                escape_html(&entry.issue_title),
-                issue_api_path(&entry.issue_identifier),
-                escape_html(&entry.state),
-                escape_html(&entry.phase),
-                escape_html(entry.review_reason.as_deref().unwrap_or("review required")),
-                escape_html(entry.phase_detail.as_deref().unwrap_or("n/a")),
-                escape_html(entry.last_command.as_deref().unwrap_or("n/a")),
-                escape_html(entry.last_file_touched.as_deref().unwrap_or("n/a")),
-                entry.diff.changed_files,
-                entry.diff.added_lines,
-                entry.diff.removed_lines,
-            )
-        })
-        .collect::<String>();
     let live_log_issue = payload
         .running
         .as_ref()
@@ -410,6 +330,18 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         .or_else(|| {
             payload
                 .needs_review
+                .as_ref()
+                .and_then(|entries| entries.first().map(|entry| entry.issue_identifier.clone()))
+        })
+        .or_else(|| {
+            payload
+                .held
+                .as_ref()
+                .and_then(|entries| entries.first().map(|entry| entry.issue_identifier.clone()))
+        })
+        .or_else(|| {
+            payload
+                .paused
                 .as_ref()
                 .and_then(|entries| entries.first().map(|entry| entry.issue_identifier.clone()))
         })
@@ -456,6 +388,8 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
       <section class="metric-grid">
         <article class="metric-card metric-card-running"><p class="metric-label">Running</p><p class="metric-value numeric" id="metric-running">{running}</p><p class="metric-detail">Active issue sessions in the current runtime.</p></article>
         <article class="metric-card metric-card-retrying"><p class="metric-label">Retrying</p><p class="metric-value numeric" id="metric-retrying">{retrying}</p><p class="metric-detail">Issues waiting for the next retry window.</p></article>
+        <article class="metric-card metric-card-runtime"><p class="metric-label">Paused</p><p class="metric-value numeric" id="metric-paused">{paused}</p><p class="metric-detail">Runs manually paused by the operator.</p></article>
+        <article class="metric-card metric-card-runtime"><p class="metric-label">Held</p><p class="metric-value numeric" id="metric-held">{held}</p><p class="metric-detail">Runs stopped and waiting for resume or retry.</p></article>
         <article class="metric-card metric-card-runtime"><p class="metric-label">Needs Review</p><p class="metric-value numeric" id="metric-review">{needs_review}</p><p class="metric-detail">Runs paused for operator inspection.</p></article>
         <article class="metric-card metric-card-tokens"><p class="metric-label">Global tokens</p><p class="metric-value numeric" id="metric-total-tokens">{total_tokens}</p><p class="metric-detail numeric">In <span id="metric-input-tokens">{input_tokens}</span> / Out <span id="metric-output-tokens">{output_tokens}</span></p></article>
         <article class="metric-card metric-card-runtime"><p class="metric-label">Runtime</p><p class="metric-value numeric" id="metric-runtime">{runtime}</p><p class="metric-detail">Total Codex runtime across completed and active sessions.</p></article>
@@ -465,18 +399,27 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
           <section class="section-card monitor-strip">
             <div class="section-header"><div><h2 class="section-title">Runtime monitor</h2><p class="section-copy">Immediate health signals for active runs.</p></div></div>
             <div class="monitor-alert" id="runtime-alert">{runtime_alert}</div>
+            <div class="operator-feedback" id="action-feedback">Operator actions will appear here.</div>
           </section>
           <section class="section-card section-card-large">
             <div class="section-header"><div><h2 class="section-title">Running sessions</h2><p class="section-copy">Active issues with phase, idle time, session details, workspace path, commands, diff stats, and telemetry health.</p></div><div class="section-pill">{running} active</div></div>
-            <div class="table-wrap" id="running-wrap"><table class="data-table data-table-running"><thead><tr><th>Issue</th><th>Status</th><th>Timing</th><th>Session</th><th>Codex update</th><th>Tokens / workspace</th></tr></thead><tbody id="running-body" data-colspan="6">{running_rows}</tbody></table></div>
+            <div class="table-wrap" id="running-wrap"><table class="data-table data-table-running"><thead><tr><th>Issue</th><th>Status</th><th>Timing</th><th>Session</th><th>Codex update</th><th>Tokens / workspace</th><th>Actions</th></tr></thead><tbody id="running-body" data-colspan="7"></tbody></table></div>
+          </section>
+          <section class="section-card">
+            <div class="section-header"><div><h2 class="section-title">Paused</h2><p class="section-copy">Runs that are blocked until you resume them.</p></div><div class="section-pill">{paused} paused</div></div>
+            <div class="table-wrap" id="paused-wrap"><table class="data-table"><thead><tr><th>Issue</th><th>Status</th><th>Execution context</th><th>Actions</th></tr></thead><tbody id="paused-body" data-colspan="4"></tbody></table></div>
+          </section>
+          <section class="section-card">
+            <div class="section-header"><div><h2 class="section-title">Held</h2><p class="section-copy">Runs stopped by the operator and waiting for follow-up.</p></div><div class="section-pill section-pill-warm">{held} held</div></div>
+            <div class="table-wrap" id="held-wrap"><table class="data-table"><thead><tr><th>Issue</th><th>Status</th><th>Execution context</th><th>Actions</th></tr></thead><tbody id="held-body" data-colspan="4"></tbody></table></div>
           </section>
           <section class="section-card">
             <div class="section-header"><div><h2 class="section-title">Needs Review</h2><p class="section-copy">Runs paused by guardrails so you can inspect them before continuing.</p></div><div class="section-pill section-pill-warm">{needs_review} waiting</div></div>
-            <div class="table-wrap" id="review-wrap"><table class="data-table"><thead><tr><th>Issue</th><th>Status</th><th>Reason</th><th>Execution context</th></tr></thead><tbody id="review-body">{review_rows}</tbody></table></div>
+            <div class="table-wrap" id="review-wrap"><table class="data-table"><thead><tr><th>Issue</th><th>Status</th><th>Reason</th><th>Execution context</th><th>Actions</th></tr></thead><tbody id="review-body" data-colspan="5"></tbody></table></div>
           </section>
           <section class="section-card">
             <div class="section-header"><div><h2 class="section-title">Retry queue</h2><p class="section-copy">Issues waiting for the next retry window.</p></div><div class="section-pill section-pill-warm">{retrying} queued</div></div>
-            <div class="table-wrap" id="retry-wrap"><table class="data-table"><thead><tr><th>Issue</th><th>Attempt</th><th>Due at</th><th>Error</th></tr></thead><tbody id="retry-body">{retry_rows}</tbody></table></div>
+            <div class="table-wrap" id="retry-wrap"><table class="data-table"><thead><tr><th>Issue</th><th>Attempt</th><th>Due at</th><th>Error</th><th>Actions</th></tr></thead><tbody id="retry-body" data-colspan="5"></tbody></table></div>
           </section>
         </div>
         <aside class="content-secondary">
@@ -517,6 +460,8 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
         generated_at = escape_html(&payload.generated_at),
         running = payload.counts.as_ref().map(|c| c.running).unwrap_or(0),
         retrying = payload.counts.as_ref().map(|c| c.retrying).unwrap_or(0),
+        paused = payload.counts.as_ref().map(|c| c.paused).unwrap_or(0),
+        held = payload.counts.as_ref().map(|c| c.held).unwrap_or(0),
         needs_review = payload.counts.as_ref().map(|c| c.needs_review).unwrap_or(0),
         total_tokens = payload
             .codex_totals
@@ -550,8 +495,6 @@ fn render_dashboard_html(config: &ServiceConfig, snapshot: &crate::model::Snapsh
             &serde_json::to_string_pretty(&payload.rate_limits)
                 .unwrap_or_else(|_| "null".to_string())
         ),
-        running_rows = running_rows,
-        retry_rows = retry_rows,
         live_log_issue = escape_html(&live_log_issue),
         state_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
     )
@@ -616,32 +559,6 @@ fn project_context_label(config: &ServiceConfig) -> &'static str {
     }
 }
 
-fn issue_api_path(issue_identifier: &str) -> String {
-    format!(
-        "/api/v1/{}",
-        issue_identifier
-            .replace('%', "%25")
-            .replace('/', "%2F")
-            .replace('#', "%23")
-    )
-}
-
-fn format_runtime(started_at: &Option<String>) -> String {
-    started_at.clone().unwrap_or_else(|| "n/a".to_string())
-}
-
-fn format_idle(started_at: &Option<String>, last_event_at: &Option<String>) -> String {
-    let started = started_at
-        .as_deref()
-        .and_then(parse_rfc3339)
-        .unwrap_or_else(Utc::now);
-    let last = last_event_at
-        .as_deref()
-        .and_then(parse_rfc3339)
-        .unwrap_or(started);
-    human_duration((Utc::now() - last).num_seconds().max(0))
-}
-
 fn format_int(value: u64) -> String {
     let text = value.to_string();
     let mut out = String::with_capacity(text.len() + text.len() / 3);
@@ -668,23 +585,8 @@ fn parse_rfc3339(value: &str) -> Option<chrono::DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-fn human_duration(total_secs: i64) -> String {
-    let secs = total_secs.max(0);
-    let hours = secs / 3600;
-    let mins = (secs % 3600) / 60;
-    let rem = secs % 60;
-    if hours > 0 {
-        format!("{hours}h {mins}m {rem}s")
-    } else if mins > 0 {
-        format!("{mins}m {rem}s")
-    } else {
-        format!("{rem}s")
-    }
-}
-
 struct RunHealth<'a> {
     label: &'a str,
-    class_name: &'a str,
 }
 
 fn run_health(entry: &presenter::RunningEntryPayload) -> RunHealth<'static> {
@@ -702,31 +604,19 @@ fn run_health(entry: &presenter::RunningEntryPayload) -> RunHealth<'static> {
     if entry.last_event_at.is_none() {
         RunHealth {
             label: "starting",
-            class_name: "health-chip-starting",
         }
     } else if idle_secs >= 300 {
         RunHealth {
             label: "stalled?",
-            class_name: "health-chip-stalled",
         }
     } else if entry.tokens.total_tokens == 0 {
         RunHealth {
             label: "active/no-usage",
-            class_name: "health-chip-no-usage",
         }
     } else {
         RunHealth {
             label: "active",
-            class_name: "health-chip-active",
         }
-    }
-}
-
-fn telemetry_warning_html(total_tokens: u64) -> String {
-    if total_tokens == 0 {
-        "<span class=\"warning-text\">No token telemetry yet</span>".to_string()
-    } else {
-        String::new()
     }
 }
 

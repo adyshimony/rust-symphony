@@ -351,7 +351,7 @@ body[data-runtime-mode="demo"] #context-mode {
 .metric-grid {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
 .metric-card {
@@ -538,6 +538,31 @@ body[data-runtime-mode="demo"] #context-mode {
   font-size: 0.92rem;
 }
 
+.operator-feedback {
+  margin-top: 10px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-strong);
+  background: rgba(8, 18, 17, 0.86);
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.operator-feedback-pending {
+  color: var(--warning);
+  border-color: rgba(255, 197, 109, 0.18);
+}
+
+.operator-feedback-success {
+  color: var(--accent);
+  border-color: rgba(84, 224, 174, 0.22);
+}
+
+.operator-feedback-error {
+  color: var(--danger);
+  border-color: rgba(255, 138, 150, 0.22);
+}
+
 .health-chip {
   display: inline-flex;
   align-items: center;
@@ -576,6 +601,45 @@ body[data-runtime-mode="demo"] #context-mode {
 
 .workspace-path {
   word-break: break-all;
+}
+
+.action-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.table-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: rgba(8, 18, 17, 0.88);
+  color: var(--ink);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.table-action-neutral {
+  color: var(--ink);
+}
+
+.table-action-info {
+  color: var(--info);
+  border-color: rgba(115, 184, 255, 0.2);
+}
+
+.table-action-success {
+  color: var(--accent);
+  border-color: rgba(84, 224, 174, 0.2);
+}
+
+.table-action-danger {
+  color: var(--danger);
+  border-color: rgba(255, 138, 150, 0.2);
 }
 
 .warning-text {
