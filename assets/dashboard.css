@@ -204,11 +204,10 @@ pre,
   display: inline-flex;
   align-items: center;
   gap: 0.46rem;
-  min-height: 2rem;
-  padding: 0.3rem 0.68rem;
-  border-radius: 999px;
-  border: 1px solid var(--line-strong);
-  background: rgba(10, 23, 21, 0.84);
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
   font-size: 0.76rem;
   font-weight: 700;
 }
@@ -221,14 +220,10 @@ pre,
 body[data-runtime-mode="demo"] .mode-badge,
 body[data-runtime-mode="demo"] #context-mode {
   color: var(--warning);
-  background: rgba(34, 26, 13, 0.88);
-  border-color: rgba(255, 197, 109, 0.22);
 }
 
 .section-pill-warm {
   color: var(--warning);
-  background: rgba(34, 26, 13, 0.88);
-  border-color: rgba(255, 197, 109, 0.22);
 }
 
 .hero-title {
@@ -301,14 +296,10 @@ body[data-runtime-mode="demo"] #context-mode {
 
 .status-badge-live {
   color: var(--accent);
-  background: rgba(11, 31, 25, 0.92);
-  border-color: rgba(84, 224, 174, 0.22);
 }
 
 .status-badge-offline {
   color: var(--danger);
-  background: rgba(35, 17, 19, 0.9);
-  border-color: rgba(255, 138, 150, 0.2);
 }
 
 #connection-offline {
@@ -566,10 +557,9 @@ body[data-runtime-mode="demo"] #context-mode {
 .health-chip {
   display: inline-flex;
   align-items: center;
-  min-height: 1.7rem;
-  padding: 0.14rem 0.5rem;
-  border-radius: 999px;
-  border: 1px solid var(--line-strong);
+  min-height: auto;
+  padding: 0;
+  border: 0;
   font-size: 0.74rem;
   font-weight: 700;
   width: fit-content;
@@ -577,26 +567,18 @@ body[data-runtime-mode="demo"] #context-mode {
 
 .health-chip-active {
   color: var(--accent);
-  background: rgba(11, 31, 25, 0.9);
-  border-color: rgba(84, 224, 174, 0.2);
 }
 
 .health-chip-starting {
   color: var(--warning);
-  background: rgba(34, 26, 13, 0.9);
-  border-color: rgba(255, 197, 109, 0.18);
 }
 
 .health-chip-no-usage {
   color: var(--info);
-  background: rgba(13, 24, 34, 0.9);
-  border-color: rgba(115, 184, 255, 0.2);
 }
 
 .health-chip-stalled {
   color: var(--danger);
-  background: rgba(35, 17, 19, 0.92);
-  border-color: rgba(255, 138, 150, 0.2);
 }
 
 .workspace-path {
@@ -614,6 +596,7 @@ body[data-runtime-mode="demo"] #context-mode {
   align-items: center;
   justify-content: center;
   min-height: 30px;
+  min-width: 72px;
   padding: 0 11px;
   border-radius: 999px;
   border: 1px solid var(--line-strong);
