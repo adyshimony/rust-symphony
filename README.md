@@ -33,8 +33,14 @@ Those links are reference material only. This repo does not depend on the old mi
 - Creates and reuses isolated per-issue workspaces
 - Runs configurable workspace hooks such as `git clone ... .`
 - Starts Codex in app-server mode inside each workspace
+- Runs a discovery-first turn before broader autonomous execution
 - Renders a prompt from `WORKFLOW.md` front matter plus a Markdown body
-- Tracks live session state, token usage, retry backoff, and runtime totals
+- Tracks live session state, token usage, retry backoff, runtime totals, last command, last file,
+  diff stats, and per-issue log paths
+- Persists raw Codex stdout/stderr plus discovery/progress reports under `.symphony/`
+- Maintains shared repository memory across issue runs
+- Exposes operator controls for pause, resume, stop, retry, refresh, and review/resume flow
+- Moves risky or oversized runs into `needs_review` instead of chewing forever
 - Cleans up workspaces automatically when issues move to terminal states
 
 ## Quick Start
@@ -57,6 +63,12 @@ Press `q` or `Ctrl-C` to leave the TUI.
 
 ### 2. Run against a real tracker
 
+Export a GitHub token first if you are using GitHub Issues:
+
+```bash
+export GITHUB_TOKEN="$(gh auth token)"
+```
+
 ```bash
 cargo run -- \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails \
@@ -73,6 +85,9 @@ Useful flags:
 
 If the workflow file is missing and `--demo` is not set, the binary falls back to demo mode.
 
+If you run against GitHub without `GITHUB_TOKEN` in the process environment, tracker polling will
+fall back to unauthenticated requests and quickly hit GitHub REST rate limits.
+
 ## How The Runtime Works
 
 ![Symphony Rust runtime lifecycle](assets/readme-lifecycle.png)
@@ -87,18 +102,23 @@ The control loop is intentionally small and deterministic:
 6. Run workspace hooks.
 7. Start a Codex app-server session in that workspace.
 8. Render the prompt template with issue data and start a turn.
-9. Stream session events back into orchestrator state for the TUI and dashboard.
-10. If the issue is still active after a normal turn, continue from the same workspace.
-11. If the run fails or stalls, apply exponential backoff and retry.
-12. If the issue reaches a terminal state, remove its workspace.
+9. Discovery turn writes a structured scope report before broader editing begins.
+10. Stream session events back into orchestrator state for the TUI and dashboard.
+11. If the issue is still active after a normal turn, continue from the same workspace.
+12. If the run exceeds review budgets or drifts, move it into `needs_review`.
+13. If the run fails or stalls, apply exponential backoff and retry.
+14. If the issue reaches a terminal state, remove its workspace.
 
 Operational behavior worth knowing:
 
 - Runtime state is in-memory. There is no database.
 - Workspaces persist across retries and continuation turns.
+- Shared repo memory is persisted under `.symphony/repo-memory.md` in the workspace root.
 - Existing terminal issues are reconciled through tracker state, not local lock files.
 - Stalled runs are aborted and rescheduled when no Codex activity appears within
   `codex.stall_timeout_ms`.
+- Guardrails can pause a run for operator review based on autonomous turns, runtime, changed files,
+  diff size, idle time, token usage, or explicit on-scope reporting.
 
 ## The `WORKFLOW.md` Contract
 
@@ -127,8 +147,10 @@ tracker:
 workspace:
   root: ~/code/symphony-workspaces
 agent:
-  max_concurrent_agents: 5
-  max_turns: 20
+  max_concurrent_agents: 1
+  max_turns: 12
+  max_autonomous_turns_before_review: 5
+  max_runtime_minutes_before_review: 25
 hooks:
   after_create: |
     git clone --depth 1 git@github.com:your-org/your-repo.git .
@@ -190,7 +212,7 @@ before dispatching work.
 | `polling` | `interval_ms` | How often the orchestrator polls for new work |
 | `workspace` | `root` | Where issue workspaces live |
 | `hooks` | `after_create`, `before_run`, `after_run`, `before_remove`, `timeout_ms` | Workspace bootstrap, validation, cleanup, and repo-specific setup |
-| `agent` | `max_concurrent_agents`, `max_turns`, `max_retry_backoff_ms`, `max_concurrent_agents_by_state` | Throughput, continuation limits, and retry pressure |
+| `agent` | `max_concurrent_agents`, `max_turns`, `max_retry_backoff_ms`, `discovery_turn_required`, `max_autonomous_turns_before_review`, `max_runtime_minutes_before_review`, `max_changed_files_before_review`, `max_diff_lines_before_review`, `max_idle_minutes_before_review`, `max_tokens_before_review`, `max_concurrent_agents_by_state` | Throughput, continuation limits, review guardrails, and retry pressure |
 | `codex` | `command`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`, `approval_policy`, `thread_sandbox`, `turn_sandbox_policy` | How the app-server session is launched and constrained |
 | `observability` | `dashboard_enabled`, `refresh_ms`, `render_interval_ms` | Parsed observability tuning fields for the dashboard surface |
 | `server` | `host`, `port` | Whether the dashboard and JSON API are served |
@@ -203,6 +225,7 @@ Implementation details that matter in practice:
 - GitHub issues can be filtered by required labels and optional assignee.
 - Linear runs expose a dynamic `linear_graphql` tool to Codex during app-server sessions.
 - The current runtime uses `server.port` to decide whether to serve the dashboard.
+- The repo-level memory file defaults to `workspace.root/.symphony/repo-memory.md`.
 
 ## Operator Surfaces
 
@@ -215,10 +238,14 @@ The terminal UI is always-on and intentionally dense.
 It shows:
 
 - active issue sessions
+- paused, held, retrying, and review-blocked work
 - current issue state
 - Codex process id and session id
 - age and turn count
-- token usage totals
+- global and per-run token usage totals
+- log-tail output for the primary active or review-blocked issue
+- last command, last file touched, diff stats, and review reasons
+- typed control commands: `pause`, `resume`, `stop`, `retry`, `refresh`, and `help`
 - backoff queue entries
 - latest rate-limit snapshot when available
 
@@ -234,6 +261,22 @@ Routes:
 - `/api/v1/state`: full runtime snapshot
 - `/api/v1/<issue_identifier>`: JSON details for one issue
 - `/api/v1/refresh`: manual refresh trigger
+- `/api/v1/issues/<issue_identifier>/pause`: pause a running or queued issue
+- `/api/v1/issues/<issue_identifier>/resume`: resume paused, held, or review-blocked work
+- `/api/v1/issues/<issue_identifier>/stop`: stop a running issue and move it to held
+- `/api/v1/issues/<issue_identifier>/retry`: retry queued, held, or review-blocked work
+- `/api/v1/issues/<issue_identifier>/logs/stdout`: raw stdout artifact
+- `/api/v1/issues/<issue_identifier>/logs/stderr`: raw stderr artifact
+- `/api/v1/issues/<issue_identifier>/reports/discovery`: discovery report artifact
+- `/api/v1/issues/<issue_identifier>/reports/progress`: progress report artifact
+
+The web console now exposes:
+
+- inline operator actions for running, paused, held, retrying, and needs-review issues
+- confirmation before `Stop`
+- visible action feedback and errors
+- live stdout tail polling
+- blocked-state timestamps and execution context
 
 ## Suggested Workflow For A Real Repository
 
@@ -242,8 +285,10 @@ Routes:
 3. Keep the prompt body short and repository-specific.
 4. Define active and terminal tracker states that match your real handoff stages.
 5. Start with a low concurrency limit.
-6. Run demo mode first to confirm your observability setup.
-7. Only move to real issues after validating hooks, tokens, and repo bootstrap behavior.
+6. Start with a small autonomous-turn budget and tune it upward once the issue shapes are stable.
+7. Run demo mode first to confirm your observability setup.
+8. Only move to real issues after validating hooks, tokens, repo bootstrap behavior, and review
+   guardrails.
 
 For most teams, the practical shape is:
 
@@ -284,7 +329,12 @@ cargo run -- --help
 
 Symphony Rust is already a usable Rust-only orchestration prototype, not just a placeholder port.
 The core loop is implemented end-to-end: workflow loading, tracker polling, workspace lifecycle,
-Codex session management, retry logic, TUI rendering, and web observability.
+Codex session management, discovery-first prompting, repo memory, retry logic, operator controls,
+TUI rendering, web observability, artifact capture, and review guardrails.
 
 The tradeoff is trust posture. This runtime is optimized for fast local iteration in controlled
 environments, not for hostile inputs or multi-tenant safety.
+
+The other active tradeoff is tuning: Symphony is most useful on small to medium, well-scoped
+tracker tasks. It can run larger work, but it is intentionally opinionated about pausing for review
+instead of maximizing unattended autonomy.
