@@ -209,12 +209,7 @@ impl AppServerSession {
                                     codex_app_server_pid: self.app_server_pid.clone(),
                                     message: Some("completed".to_string()),
                                     usage: usage_from_payload(&payload),
-                                    rate_limits: payload.get("usage").and_then(|usage| {
-                                        usage
-                                            .get("rate_limits")
-                                            .cloned()
-                                            .or_else(|| usage.get("rateLimits").cloned())
-                                    }),
+                                    rate_limits: rate_limits_from_payload(&payload),
                                     phase: Some(RunPhase::Waiting),
                                     phase_detail: Some(
                                         "turn completed; reconciling issue state".to_string(),
@@ -285,12 +280,7 @@ impl AppServerSession {
                                     codex_app_server_pid: self.app_server_pid.clone(),
                                     message: summarize_payload(&payload),
                                     usage: usage_from_payload(&payload),
-                                    rate_limits: payload.get("usage").and_then(|usage| {
-                                        usage
-                                            .get("rate_limits")
-                                            .cloned()
-                                            .or_else(|| usage.get("rateLimits").cloned())
-                                    }),
+                                    rate_limits: rate_limits_from_payload(&payload),
                                     phase: infer_phase(other, &payload),
                                     phase_detail: summarize_payload(&payload),
                                     last_command: command_from_payload(&payload),
@@ -422,24 +412,87 @@ impl AppServerSession {
 }
 
 fn usage_from_payload(payload: &Value) -> Option<TokenUsage> {
-    let usage = payload.get("usage")?;
-    Some(TokenUsage {
-        input_tokens: usage
-            .get("input_tokens")
-            .or_else(|| usage.get("inputTokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
-        output_tokens: usage
-            .get("output_tokens")
-            .or_else(|| usage.get("outputTokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
-        total_tokens: usage
-            .get("total_tokens")
-            .or_else(|| usage.get("totalTokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
-    })
+    usage_candidates(payload)
+        .into_iter()
+        .find_map(token_usage_from_value)
+}
+
+fn usage_candidates<'a>(payload: &'a Value) -> Vec<&'a Value> {
+    vec![
+        payload.get("usage"),
+        payload.pointer("/params/usage"),
+        payload.pointer("/params/tokenUsage"),
+        payload.pointer("/params/token_usage"),
+        payload.pointer("/params/msg/usage"),
+        payload.pointer("/params/msg/tokenUsage"),
+        payload.pointer("/params/msg/token_usage"),
+        payload.pointer("/params/info"),
+        payload.pointer("/params/msg/info"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn token_usage_from_value(value: &Value) -> Option<TokenUsage> {
+    let input_tokens = find_first_u64(
+        value,
+        &[
+            "input_tokens",
+            "inputTokens",
+            "input_token_count",
+            "inputTokenCount",
+        ],
+    )
+    .unwrap_or_default();
+    let output_tokens = find_first_u64(
+        value,
+        &[
+            "output_tokens",
+            "outputTokens",
+            "output_token_count",
+            "outputTokenCount",
+        ],
+    )
+    .unwrap_or_default();
+    let total_tokens = find_first_u64(
+        value,
+        &[
+            "total_tokens",
+            "totalTokens",
+            "total_token_usage",
+            "totalTokenUsage",
+            "totalUsage",
+        ],
+    )
+    .unwrap_or(input_tokens + output_tokens);
+
+    if input_tokens == 0 && output_tokens == 0 && total_tokens == 0 {
+        None
+    } else {
+        Some(TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens,
+        })
+    }
+}
+
+fn rate_limits_from_payload(payload: &Value) -> Option<Value> {
+    [
+        payload.pointer("/usage/rate_limits"),
+        payload.pointer("/usage/rateLimits"),
+        payload.pointer("/params/rate_limits"),
+        payload.pointer("/params/rateLimits"),
+        payload.pointer("/params/msg/info/rate_limits"),
+        payload.pointer("/params/msg/info/rateLimits"),
+        payload.pointer("/params/msg/rate_limits"),
+        payload.pointer("/params/msg/rateLimits"),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    .cloned()
 }
 
 fn summarize_payload(payload: &Value) -> Option<String> {
@@ -505,5 +558,78 @@ fn find_first_string(value: &Value, keys: &[&str]) -> Option<String> {
         }
         Value::Array(items) => items.iter().find_map(|item| find_first_string(item, keys)),
         _ => None,
+    }
+}
+
+fn find_first_u64(value: &Value, keys: &[&str]) -> Option<u64> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(number) = map.get(*key).and_then(Value::as_u64) {
+                    return Some(number);
+                }
+            }
+            map.values().find_map(|child| find_first_u64(child, keys))
+        }
+        Value::Array(items) => items.iter().find_map(|item| find_first_u64(item, keys)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{rate_limits_from_payload, usage_from_payload};
+
+    #[test]
+    fn usage_from_payload_reads_nested_token_usage_events() {
+        let payload = json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "tokenUsage": {
+                    "inputTokens": 1200,
+                    "outputTokens": 340,
+                    "totalTokens": 1540
+                }
+            }
+        });
+
+        let usage = usage_from_payload(&payload).expect("usage");
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.output_tokens, 340);
+        assert_eq!(usage.total_tokens, 1540);
+    }
+
+    #[test]
+    fn usage_from_payload_reads_msg_info_token_count_events() {
+        let payload = json!({
+            "method": "codex/event/token_count",
+            "params": {
+                "msg": {
+                    "info": {
+                        "total_token_usage": 9876
+                    }
+                }
+            }
+        });
+
+        let usage = usage_from_payload(&payload).expect("usage");
+        assert_eq!(usage.total_tokens, 9876);
+    }
+
+    #[test]
+    fn rate_limits_from_payload_reads_nested_shapes() {
+        let payload = json!({
+            "method": "account/rateLimits/updated",
+            "params": {
+                "rateLimits": {
+                    "primary": { "usedPercent": 1 }
+                }
+            }
+        });
+
+        let rate_limits = rate_limits_from_payload(&payload).expect("rate limits");
+        assert_eq!(rate_limits["primary"]["usedPercent"], 1);
     }
 }

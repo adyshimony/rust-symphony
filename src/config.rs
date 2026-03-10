@@ -63,7 +63,7 @@ fn default_discovery_turn_required() -> bool {
 }
 
 fn default_max_autonomous_turns_before_review() -> u32 {
-    3
+    5
 }
 
 fn default_max_runtime_minutes_before_review() -> u64 {
