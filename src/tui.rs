@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::orchestrator::OrchestratorHandle;
@@ -112,7 +112,11 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot, tui_state: &
     let header = header_text(snapshot);
     frame.render_widget(
         Paragraph::new(header)
-            .block(Block::default().title("SYMPHONY STATUS"))
+            .block(
+                Block::default()
+                    .title("SYMPHONY STATUS")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
         layout[0],
     );
@@ -120,7 +124,11 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot, tui_state: &
     let log_tail = log_tail_text(snapshot);
     frame.render_widget(
         Paragraph::new(log_tail)
-            .block(Block::default().title("Live Log Tail"))
+            .block(
+                Block::default()
+                    .title("Live Log Tail")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         layout[1],
     );
@@ -128,7 +136,7 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot, tui_state: &
     let running = running_text(snapshot);
     frame.render_widget(
         Paragraph::new(running)
-            .block(Block::default().title("Running"))
+            .block(Block::default().title("Running").borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
         layout[2],
     );
@@ -136,7 +144,11 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot, tui_state: &
     let blocked = blocked_text(snapshot);
     frame.render_widget(
         Paragraph::new(blocked)
-            .block(Block::default().title("Paused / Held / Review"))
+            .block(
+                Block::default()
+                    .title("Paused / Held / Review")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
         layout[3],
     );
@@ -144,7 +156,11 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot, tui_state: &
     let retry = retry_text(snapshot);
     frame.render_widget(
         Paragraph::new(retry)
-            .block(Block::default().title("Backoff Queue"))
+            .block(
+                Block::default()
+                    .title("Backoff Queue")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
         layout[4],
     );
@@ -152,7 +168,7 @@ fn render(frame: &mut Frame<'_>, snapshot: &crate::model::Snapshot, tui_state: &
     let command = command_text(tui_state);
     frame.render_widget(
         Paragraph::new(command)
-            .block(Block::default().title("Command"))
+            .block(Block::default().title("Command").borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
         layout[5],
     );
